@@ -46,6 +46,7 @@ def main(cfg: DictConfig):
     simulation_app = app_launcher.app
 
     run = wandb.init(
+        entity="DP-Next-HDMI",
         job_type=cfg.wandb.job_type,
         project=cfg.wandb.project,
         mode=cfg.wandb.mode,
