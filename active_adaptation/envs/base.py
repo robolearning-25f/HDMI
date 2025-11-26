@@ -306,6 +306,10 @@ class _Env(EnvBase):
         self.current_iter = progress
 
     @property
+    def need_render(self) -> bool:
+        return False
+
+    @property
     def action_dim(self) -> int:
         return self.action_manager.action_dim
 
@@ -417,24 +421,11 @@ class _Env(EnvBase):
     def _update(self):
         start = time.perf_counter()
         for callback in self._update_callbacks:
-            # time_start = time.perf_counter()
             callback()
-            # time_end = time.perf_counter()
-            
-            # # Get the class name and category
-            # name = callback.__self__.__class__.__name__
-            # category = classify_callback(callback)
-            
-            # # Create the new key format: category.name
-            # key = f"{category}.{name}"
-            
-            # if key not in self._perf_ema_update:
-            #     self._perf_ema_update[key] = (torch.tensor(0., device=self.device), torch.tensor(0., device=self.device))
-            # sum_, cnt = self._perf_ema_update[key]
-            # sum_.add_(time_end - time_start)
-            # cnt.add_(1.)
+
         if self.sim.has_gui():
             self.sim.render()
+        
         self.episode_length_buf.add_(1)
         self.timestamp += 1
         end = time.perf_counter()
@@ -452,14 +443,7 @@ class _Env(EnvBase):
             for callback in self._pre_step_callbacks:
                 callback(substep)
             self.scene.write_data_to_sim()
-            self.sim.step(render=True)
-
-            # Save camera data only for the last substep (every frame)
-            if (self.cfg.get("enable_cameras", False) and
-                "tiled_camera" in self.scene.sensors and
-                substep == self.decimation - 1):
-                self._save_camera_frame()
-
+            self.sim.step(render=self.need_render)
             self.scene.update(self.physics_dt)
             for callback in self._post_step_callbacks:
                 callback(substep)
