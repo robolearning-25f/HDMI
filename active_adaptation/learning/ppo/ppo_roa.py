@@ -1,13 +1,11 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.distributions as D
-import warnings
-import functools
-import torch.utils._pytree as pytree
-import einops
 import copy
+import torch
+import einops
+import warnings
 import numpy as np
+import torch.nn as nn
+import torch.distributions as D
+import torch.utils._pytree as pytree
 
 from torchrl.data import CompositeSpec, TensorSpec, Unbounded
 from torchrl.modules import ProbabilisticActor
@@ -19,7 +17,7 @@ from tensordict.nn import (
     TensorDictSequential as Seq
 )
 from hydra.core.config_store import ConfigStore
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Union, List
 from collections import OrderedDict
 

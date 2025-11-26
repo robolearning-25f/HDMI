@@ -131,6 +131,7 @@ observation:
     object_xy_b:               {noise_std: 0.01, episodic_noise_std: 0.0}
     object_heading_b:          {noise_std: 0.01, episodic_noise_std: 0.0}
     ref_contact_pos_b:         {noise_std: 0.01, episodic_noise_std: 0.02, yaw_only: true}
+  
   depth:
     depth_camera:              {camera_name: "tiled_camera"}
 
