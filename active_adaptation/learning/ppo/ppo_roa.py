@@ -82,6 +82,7 @@ class PPOConfig:
     vecnorm: Union[str, None] = None
     checkpoint_path: Union[str, None] = None
     in_keys: List[str] = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY)
+    strict_in_keys: bool = True
 
 cs = ConfigStore.instance()
 cs.store("ppo_roa_train", node=PPOConfig(phase="train", vecnorm="train", entropy_coef_start=0.001, entropy_coef_end=0.001), group="algo")
@@ -89,6 +90,135 @@ cs.store("ppo_roa_adapt", node=PPOConfig(phase="adapt", vecnorm="eval", entropy_
 cs.store("ppo_roa_finetune", node=PPOConfig(phase="finetune", vecnorm="eval", entropy_coef_start=0.001, entropy_coef_end=0.001), group="algo")
 cs.store("ppo_roa_train_est", node=PPOConfig(phase="train_est", vecnorm="eval", entropy_coef_start=0.00, entropy_coef_end=0.00, in_keys=(CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY, DEPTH_KEY)), group="algo")
 cs.store("ppo_roa_adapt_est", node=PPOConfig(phase="adapt_est", vecnorm="eval", entropy_coef_start=0.00, entropy_coef_end=0.00, in_keys=(CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY, DEPTH_KEY)), group="algo")
+
+
+class _PhaseHandler:
+    """Base strategy for phase-specific rollout and training."""
+    name = "base"
+    required_in_keys: tuple[str, ...] = ()
+    required_inference_keys: tuple[str, ...] = ()
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        raise NotImplementedError
+
+    def rollout_out_keys(self, ppo: "PPOROA"):
+        out_keys = ["sample_log_prob", "action"] + ppo.dist_keys
+        if ppo.cfg.adapt_module == "gru":
+            out_keys.append(("next", "adapt_hx"))
+        if ppo.cfg.train_dr_estimator:
+            out_keys.append("dr_pred")
+        return out_keys
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        return {}
+
+    def rollout_modules_inference(self, ppo: "PPOROA"):
+        # Default: same modules for inference as training rollout
+        return self.rollout_modules(ppo)
+
+
+class _TrainPhaseHandler(_PhaseHandler):
+    name = "train"
+    required_in_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY)
+    required_inference_keys = required_in_keys
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        modules = [ppo.encoder_priv, ppo.actor, ppo.adapt_module]
+        if ppo.cfg.train_dr_estimator:
+            modules.append(ppo.dr_estimator)
+        return modules
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        info = {}
+        info.update(ppo.train_policy(tensordict.copy()))
+        info.update(ppo.train_adapt(tensordict.copy()))
+        return info
+
+
+class _AdaptPhaseHandler(_PhaseHandler):
+    name = "adapt"
+    required_in_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY)
+    required_inference_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY)
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        modules = [ppo.adapt_module, ppo.actor_adapt]
+        if ppo.cfg.train_dr_estimator:
+            modules.append(ppo.dr_estimator)
+        return modules
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        return ppo.train_adapt(tensordict.copy())
+
+
+class _FinetunePhaseHandler(_PhaseHandler):
+    name = "finetune"
+    required_in_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY)
+    required_inference_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY)
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        modules = [ppo.adapt_ema, ppo.actor_adapt]
+        if ppo.cfg.train_dr_estimator:
+            modules.append(ppo.dr_estimator)
+        return modules
+
+    def rollout_out_keys(self, ppo: "PPOROA"):
+        out_keys = super().rollout_out_keys(ppo)
+        out_keys.append(PRIV_PRED_KEY)
+        return out_keys
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        info = {}
+        info.update(ppo.train_policy(tensordict.copy()))
+        info.update(ppo.train_adapt(tensordict.copy()))
+        return info
+
+
+class _TrainEstPhaseHandler(_PhaseHandler):
+    name = "train_est"
+    required_in_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY, DEPTH_KEY)
+    required_inference_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, DEPTH_KEY)
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        modules = [ppo.adapt_ema, ppo.actor_adapt]
+        if ppo.cfg.train_dr_estimator:
+            modules.append(ppo.dr_estimator)
+        return modules
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        return ppo.train_estimator(tensordict.copy())
+
+
+class _AdaptEstPhaseHandler(_PhaseHandler):
+    name = "adapt_est"
+    required_in_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, OBS_PRIV_KEY, DEPTH_KEY)
+    required_inference_keys = (CMD_KEY, OBS_KEY, OBJECT_KEY, DEPTH_KEY)
+
+    def rollout_modules(self, ppo: "PPOROA"):
+        modules = [ppo.estimator, ppo.actor_adapt]
+        if ppo.cfg.train_dr_estimator:
+            modules.append(ppo.dr_estimator)
+        return modules
+
+    def rollout_out_keys(self, ppo: "PPOROA"):
+        out_keys = super().rollout_out_keys(ppo)
+        out_keys.append("priv_est")
+        return out_keys
+
+    def train(self, ppo: "PPOROA", tensordict: TensorDict):
+        info = {}
+        info.update(ppo.train_policy(tensordict.copy()))
+        info.update(ppo.train_estimator(tensordict.copy()))
+        return info
+
+
+PHASE_HANDLERS = {
+    "train": _TrainPhaseHandler(),
+    "adapt": _AdaptPhaseHandler(),
+    "finetune": _FinetunePhaseHandler(),
+    "train_est": _TrainEstPhaseHandler(),
+    "adapt_est": _AdaptEstPhaseHandler(),
+}
+
 
 class GRU(nn.Module):
     def __init__(
@@ -155,6 +285,9 @@ class PPOROA(TensorDictModuleBase):
         self.device = device
         self.observation_spec = observation_spec
         assert self.cfg.phase in ["train", "adapt", "finetune", "train_est", "adapt_est"]
+        if self.cfg.phase not in PHASE_HANDLERS:
+            raise ValueError(f"Unknown phase {self.cfg.phase}")
+        self.phase_handler: _PhaseHandler = PHASE_HANDLERS[self.cfg.phase]
 
         self.entropy_coef = self.cfg.entropy_coef_start
         self.desired_kl = cfg.desired_kl
@@ -177,30 +310,39 @@ class PPOROA(TensorDictModuleBase):
 
         self.action_dim = action_spec.shape[-1]
         self.joint_names = env.action_manager.joint_names
-        
+        self.priv_available = observation_spec.get(OBS_PRIV_KEY, None) is not None
+        if self.cfg.phase == "train" and not self.priv_available:
+            raise KeyError("Training phase requires priv observations, but OBS_PRIV_KEY is missing.")
+
         fake_input = observation_spec.zero()
-        
+
         if observation_spec.get("command_", None) is not None:
             global CMD_KEY
             CMD_KEY = "command_"
-        
+
         # build encoder, adapt module, critic
-        encoder_priv_in_keys = [OBS_PRIV_KEY]
+        encoder_priv_in_keys = [OBS_PRIV_KEY] if self.priv_available else []
         adapt_module_in_keys = [OBS_KEY]
-        critic_in_keys = [OBS_PRIV_KEY, OBS_KEY, CMD_KEY]
+        critic_in_keys = [OBS_KEY, CMD_KEY]
+        if self.priv_available:
+            critic_in_keys.insert(0, OBS_PRIV_KEY)
         if self.cfg.adapt_module_input_cmd:
             adapt_module_in_keys.append(CMD_KEY)
         if observation_spec.get(OBJECT_KEY, None) is not None:
-            encoder_priv_in_keys.append(OBJECT_KEY)
+            if self.priv_available:
+                encoder_priv_in_keys.append(OBJECT_KEY)
             adapt_module_in_keys.append(OBJECT_KEY)
             critic_in_keys.append(OBJECT_KEY)
     
         latent_dim = self.cfg.latent_dim
-        self.encoder_priv = Seq(
-            CatTensors(encoder_priv_in_keys, "_encoder_priv_inp", del_keys=False, sort=False),
-            Mod(nn.Sequential(make_mlp([latent_dim]), nn.LazyLinear(latent_dim)), "_encoder_priv_inp", PRIV_FEATURE_KEY),
-            selected_out_keys=[PRIV_FEATURE_KEY]
-        ).to(self.device)
+        if self.priv_available:
+            self.encoder_priv = Seq(
+                CatTensors(encoder_priv_in_keys, "_encoder_priv_inp", del_keys=False, sort=False),
+                Mod(nn.Sequential(make_mlp([latent_dim]), nn.LazyLinear(latent_dim)), "_encoder_priv_inp", PRIV_FEATURE_KEY),
+                selected_out_keys=[PRIV_FEATURE_KEY]
+            ).to(self.device)
+        else:
+            self.encoder_priv = None
 
         if self.cfg.adapt_module == "gru":
             self.adapt_module =  Seq(
@@ -254,8 +396,11 @@ class PPOROA(TensorDictModuleBase):
         self.dist_cls = IndependentNormal
         self.dist_keys = IndependentNormal.dist_keys
 
-        in_keys = [CMD_KEY, OBS_KEY, PRIV_FEATURE_KEY]
-        self.actor = build_actor(in_keys, self.dist_cls, self.dist_keys, residual_module=residual_module)
+        self.actor = None
+        if self.priv_available or self.cfg.phase == "train":
+            in_keys = [CMD_KEY, OBS_KEY, PRIV_FEATURE_KEY]
+            self.actor = build_actor(in_keys, self.dist_cls, self.dist_keys, residual_module=residual_module)
+
         if cfg.phase == "adapt_est":
             in_keys = [CMD_KEY, OBS_KEY, "priv_est"]
         else:
@@ -263,11 +408,13 @@ class PPOROA(TensorDictModuleBase):
         self.actor_adapt = build_actor(in_keys, self.dist_cls, self.dist_keys)
 
         # build critic
-        _critic = nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(num_reward_groups))
-        self.critic = Seq(
-            CatTensors(critic_in_keys, "_critic_input", del_keys=False),
-            Mod(_critic, ["_critic_input"], ["state_value"])
-        ).to(self.device)
+        self.critic = None
+        if self.priv_available:
+            _critic = nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(num_reward_groups))
+            self.critic = Seq(
+                CatTensors(critic_in_keys, "_critic_input", del_keys=False),
+                Mod(_critic, ["_critic_input"], ["state_value"])
+            ).to(self.device)
 
         # build estimator
         if self.cfg.phase in ["train_est", "adapt_est"]:
@@ -293,21 +440,6 @@ class PPOROA(TensorDictModuleBase):
                 selected_out_keys=["priv_est"]
             ).to(self.device)
             
-            # mlp = make_mlp([latent_dim])
-            # cnn = nn.Sequential(
-            #     make_conv(
-            #         num_channels=[8, 8, 8], 
-            #         activation=nn.Mish, 
-            #         kernel_sizes=5
-            #     ), 
-            #     nn.LazyLinear(64), 
-            #     nn.LayerNorm(64)
-            # )
-            # back_bone = make_mlp([latent_dim, latent_dim])
-            # mlp_out = mlp(observation)
-            # cnn_out = cnn(depth)
-            # feature_est = back_bone(torch.cat([mlp_out, cnn_out], dim=-1))
-            
         if self.cfg.train_dr_estimator:
             assert "dr_" in observation_spec, "dr_ should be in observation_spec"
             dr_shape = observation_spec["dr_"].shape[-1]
@@ -321,9 +453,12 @@ class PPOROA(TensorDictModuleBase):
             fake_input["is_init"] = torch.ones(fake_input.shape[0], 1, dtype=torch.bool)
             fake_input["adapt_hx"] = torch.zeros(fake_input.shape[0], latent_dim)
 
-        self.encoder_priv(fake_input)
-        self.actor(fake_input)
-        self.critic(fake_input)
+        if self.encoder_priv is not None:
+            self.encoder_priv(fake_input)
+        if self.actor is not None:
+            self.actor(fake_input)
+        if self.critic is not None:
+            self.critic(fake_input)
         self.adapt_module(fake_input)
         if self.cfg.phase in ["train_est", "adapt_est"]:
             self.estimator(fake_input)
@@ -344,10 +479,12 @@ class PPOROA(TensorDictModuleBase):
 
         self.lr_policy = cfg.lr
         if self.cfg.phase == "train":
+            if self.actor is None or self.encoder_priv is None:
+                raise KeyError("Training phase requires actor and encoder_priv.")
             policy_params = [
-                    {"params": self.actor.parameters()},
-                    {"params": self.encoder_priv.parameters()},
-                ]
+                {"params": self.actor.parameters()},
+                {"params": self.encoder_priv.parameters()},
+            ]
         else:
             policy_params = [
                     {"params": self.actor_adapt.parameters()},
@@ -357,12 +494,14 @@ class PPOROA(TensorDictModuleBase):
             policy_params,
             lr=self.lr_policy,
         )
-        self.opt_critic = torch.optim.Adam(
-            [
-                {"params": self.critic.parameters()},
-            ],
-            lr=cfg.lr,
-        )
+        self.opt_critic = None
+        if self.critic is not None:
+            self.opt_critic = torch.optim.Adam(
+                [
+                    {"params": self.critic.parameters()},
+                ],
+                lr=cfg.lr,
+            )
 
         self.opt_adapt = torch.optim.Adam(
             [
@@ -392,6 +531,18 @@ class PPOROA(TensorDictModuleBase):
                 lr=cfg.lr,
             )
         self.num_updates = 0
+
+    def _validate_required_in_keys(self, observation_spec: CompositeSpec, required_keys):
+        missing_keys = []
+        for key in required_keys:
+            if observation_spec.get(key, None) is not None:
+                continue
+            if key == CMD_KEY and observation_spec.get("command_", None) is not None:
+                continue
+            missing_keys.append(key)
+        if missing_keys:
+            available = list(observation_spec.keys(True, True))
+            raise KeyError(f"Missing observation groups for phase '{self.cfg.phase}': {missing_keys}. Available: {available}")
     
     def make_tensordict_primer(self):
         num_envs = self.observation_spec.shape[0]
@@ -402,56 +553,23 @@ class PPOROA(TensorDictModuleBase):
             return TensorDictPrimer({}, reset_key="done")
 
     def get_rollout_policy(self, mode: str="train"):
-        modules = []
-        
-        if self.cfg.phase == "train":
-            modules.append(self.encoder_priv)
-            modules.append(self.actor)
-            modules.append(self.adapt_module)
-        elif self.cfg.phase == "adapt":
-            modules.append(self.adapt_module)
-            modules.append(self.actor_adapt)
-        elif self.cfg.phase == "finetune":
-            modules.append(self.adapt_ema)
-            modules.append(self.actor_adapt)
-        elif self.cfg.phase == "train_est":
-            modules.append(self.adapt_ema)
-            modules.append(self.actor_adapt)
-        elif self.cfg.phase == "adapt_est":
-            modules.append(self.estimator)
-            modules.append(self.actor_adapt)
+        self._validate_required_in_keys(self.observation_spec, self.phase_handler.required_in_keys)
+        modules = self.phase_handler.rollout_modules(self)
+        out_keys = self.phase_handler.rollout_out_keys(self)
+        policy = Seq(*modules, selected_out_keys=out_keys)
+        return policy
 
-        out_keys = ["sample_log_prob", "action"] + self.dist_keys
-        if self.cfg.adapt_module == "gru":
-            out_keys.append(("next", "adapt_hx"))
-        if self.cfg.phase == "finetune":
-            out_keys.append(PRIV_PRED_KEY)
-        if self.cfg.phase == "adapt_est":
-            out_keys.append("priv_est")
-
-        if self.cfg.train_dr_estimator:
-            modules.append(self.dr_estimator)
-            out_keys.append("dr_pred")
-
+    def get_inference_policy(self, mode: str="deploy"):
+        """Rollout policy that allows dropping OBS_PRIV_KEY where possible."""
+        self._validate_required_in_keys(self.observation_spec, self.phase_handler.required_inference_keys)
+        modules = self.phase_handler.rollout_modules_inference(self)
+        out_keys = self.phase_handler.rollout_out_keys(self)
         policy = Seq(*modules, selected_out_keys=out_keys)
         return policy
     
     def train_op(self, tensordict: TensorDict):
         tensordict = tensordict.exclude("stats")
-        info = {}
-        if self.cfg.phase == "train":
-            info.update(self.train_policy(tensordict.copy()))
-            info.update(self.train_adapt(tensordict.copy()))
-        elif self.cfg.phase == "adapt":
-            info.update(self.train_adapt(tensordict.copy()))
-        elif self.cfg.phase == "finetune":
-            info.update(self.train_policy(tensordict.copy()))
-            info.update(self.train_adapt(tensordict.copy()))
-        elif self.cfg.phase == "train_est":
-            info.update(self.train_estimator(tensordict.copy()))
-        elif self.cfg.phase == "adapt_est":
-            info.update(self.train_policy(tensordict.copy()))
-            info.update(self.train_estimator(tensordict.copy()))
+        info = self.phase_handler.train(self, tensordict)
             
         self.num_updates += 1
 
