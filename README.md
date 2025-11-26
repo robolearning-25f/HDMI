@@ -78,3 +78,19 @@ python scripts/play.py algo=ppo_roa_finetune task=G1/hdmi/move_suitcase checkpoi
 ## Sim2Real
 
 Please see [github.com/EGalahad/sim2real](https://github.com/EGalahad/sim2real) for details.
+
+## Citation
+
+If you find our work useful for your research, please consider cite us:
+
+```
+@misc{weng2025hdmilearninginteractivehumanoid,
+      title={HDMI: Learning Interactive Humanoid Whole-Body Control from Human Videos}, 
+      author={Haoyang Weng and Yitang Li and Nikhil Sobanbabu and Zihan Wang and Zhengyi Luo and Tairan He and Deva Ramanan and Guanya Shi},
+      year={2025},
+      eprint={2509.16757},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2509.16757}, 
+}
+```
