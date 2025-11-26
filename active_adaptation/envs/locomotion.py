@@ -116,7 +116,7 @@ class SimpleEnv(_Env):
                 track_air_time=True
             )
 
-            if self.cfg.get("enable_cameras", False):
+            if True: # self.cfg.get("enable_cameras", True):
                 from isaaclab.sensors import TiledCameraCfg
                 # this is from my ros reading
                 # camera_spawn_cfg = sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
@@ -141,11 +141,11 @@ class SimpleEnv(_Env):
                     horizontal_aperture=20.0,
                     clipping_range=(0.1, 1.0e5),
                 )
-                tiled_camera: TiledCameraCfg = TiledCameraCfg(
-                    prim_path="/World/envs/env_.*/Robot/d435_link/front_cam",
+                tiled_camera1: TiledCameraCfg = TiledCameraCfg(
+                    prim_path="/World/envs/env_.*/Robot/d435_link/front_cam1",
                     spawn=camera_spawn_cfg,
                     offset=TiledCameraCfg.OffsetCfg(
-                        pos=(0.0, 0.0, 0.0),
+                        pos=(0.0, 0.075, 0.0),
                         rot=(0.5, -0.5, 0.5, -0.5),
                         convention="ros"
                     ),
@@ -157,7 +157,24 @@ class SimpleEnv(_Env):
                     width=self.cfg.camera_width,
                     height=self.cfg.camera_height,
                 )
-                scene_cfg.tiled_camera = tiled_camera
+                tiled_camera2: TiledCameraCfg = TiledCameraCfg(
+                    prim_path="/World/envs/env_.*/Robot/d435_link/front_cam2",
+                    spawn=camera_spawn_cfg,
+                    offset=TiledCameraCfg.OffsetCfg(
+                        pos=(0.0, -0.075, 0.0),
+                        rot=(0.5, -0.5, 0.5, -0.5),
+                        convention="ros"
+                    ),
+                    # NOTE: remove rgb does not improve speed, and only slightly reduces memory usage
+                    # TODO: depth or distance_to_image_plane?
+                    data_types=["rgb", "depth", "distance_to_image_plane"],
+                    update_latest_camera_pose=True,
+                    update_period=0.02,
+                    width=self.cfg.camera_width,
+                    height=self.cfg.camera_height,
+                )
+                scene_cfg.tiled_camera1 = tiled_camera1
+                scene_cfg.tiled_camera2 = tiled_camera2
             
             # if self.cfg.get("enable_raycaster", False):
             #     from isaaclab.sensors import RayCasterCfg

@@ -171,6 +171,7 @@ artifacts/
 # assets
 *.ipynb
 *.mp4
+*.png
 
 # local scripts
 *.sh

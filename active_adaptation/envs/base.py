@@ -20,6 +20,7 @@ import time
 import active_adaptation
 import active_adaptation.envs.mdp as mdp
 import active_adaptation.utils.symmetry as symmetry_utils
+from PIL import Image
 
 if active_adaptation.get_backend() == "isaac":
     import isaaclab.sim as sim_utils
@@ -479,7 +480,10 @@ class _Env(EnvBase):
             for callback in self._pre_step_callbacks:
                 callback(substep)
             self.scene.write_data_to_sim()
-            self.sim.step(render=False)
+            self.sim.step(render=True)
+            # import ipdb; ipdb.set_trace()
+            Image.fromarray(self.scene["tiled_camera1"].data.output["rgb"].cpu().numpy()[0]).save(f'cam1_{substep}.png')
+            Image.fromarray(self.scene["tiled_camera2"].data.output["rgb"].cpu().numpy()[0]).save(f'cam2_{substep}.png')
             self.scene.update(self.physics_dt)
             for callback in self._post_step_callbacks:
                 callback(substep)
