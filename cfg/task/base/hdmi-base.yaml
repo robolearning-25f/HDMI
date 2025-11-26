@@ -133,6 +133,9 @@ observation:
     object_heading_b:          {noise_std: 0.01, episodic_noise_std: 0.0}
     ref_contact_pos_b:         {noise_std: 0.01, episodic_noise_std: 0.02, yaw_only: true}
   
+  stereo:
+    rgb_camera:                {camera_name: "tiled_camera", noise_std: 0.01, delay_range: [0, 2]}
+
   # depth:
   #   depth_camera:              {camera_name: "tiled_camera"}
 
