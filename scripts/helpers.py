@@ -3,8 +3,6 @@ import torch.nn as nn
 import hydra
 import numpy as np
 import time
-import wandb
-import logging
 import os
 import datetime
 
@@ -14,10 +12,8 @@ from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.envs.transforms import VecNorm
 
 from termcolor import colored
-from collections import OrderedDict
 import imageio
 from omegaconf import OmegaConf, DictConfig
-import active_adaptation.learning
 from active_adaptation.utils.wandb import parse_checkpoint_path
 import active_adaptation
 if TYPE_CHECKING:
@@ -374,4 +370,3 @@ def plot_obs_histogram(
     plt.tight_layout()
     plt.savefig(os.path.join(os.path.dirname(__file__), "trajs_obs_hist.png"))
     plt.close()
-    
