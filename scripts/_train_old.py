@@ -75,66 +75,42 @@ def main(cfg: DictConfig):
             print(f"{i:3d}. {body_name}")
         print("="*80 + "\n")
     
+    # 设置相机图像保存功能
     save_camera_images = None
-    camera1_available = "tiled_camera1" in env.scene.sensors
-    camera2_available = "tiled_camera2" in env.scene.sensors
-    
-    if camera1_available or camera2_available:
+    if "tiled_camera" in env.scene.sensors:
+        camera = env.scene.sensors["tiled_camera"]
+        print(f"✅ Camera found!")
+        print(f"   Prim path: {camera.cfg.prim_path}")
+        print(f"   Resolution: {camera.cfg.width}x{camera.cfg.height}")
+        print(f"   Offset: {camera.cfg.offset}")
+        
         import imageio
         import numpy as np
         
-        save_dir = "/home/jiting/workspace/data/hdmi/push_stereo_camera_steps"
+        save_dir = "/home/jiting/workspace/data/hdmi/camera_steps"
         os.makedirs(save_dir, exist_ok=True)
         
-        if camera1_available:
-            camera1 = env.scene.sensors["tiled_camera1"]
-            print(f"    Camera 1 found!")
-            print(f"   - Prim path: {camera1.cfg.prim_path}")
-            print(f"   - Resolution: {camera1.cfg.width}x{camera1.cfg.height}")
-            print(f"   - Position offset: {camera1.cfg.offset.pos}")
-        
-        if camera2_available:
-            camera2 = env.scene.sensors["tiled_camera2"]
-            print(f"    Camera 2 found!")
-            print(f"   - Prim path: {camera2.cfg.prim_path}")
-            print(f"   - Resolution: {camera2.cfg.width}x{camera2.cfg.height}")
-            print(f"   - Position offset: {camera2.cfg.offset.pos}")
-        
         def save_camera_images(step_idx, num_envs_to_save=1):
+            """每个step保存相机图像"""
             if not aa.is_main_process():
                 return
             
-            for env_id in range(num_envs_to_save):
-                # cam1
-                if camera1_available:
-                    rgb1 = camera1.data.output["rgb"][env_id].cpu().numpy()
-                    depth1 = camera1.data.output["depth"][env_id].squeeze(-1).cpu().numpy()
-                    
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam1_rgb.png", 
-                        rgb1
-                    )
-                    depth1_vis = (np.clip(depth1, 0, 10) / 10 * 255).astype(np.uint8)
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam1_depth.png", 
-                        depth1_vis
-                    )
+            rgb_all = camera.data.output["rgb"]
+            depth_all = camera.data.output["depth"]
+            
+            for env_id in range(min(num_envs_to_save, rgb_all.shape[0])):
+                # RGB
+                rgb_np = rgb_all[env_id].cpu().numpy()
+                imageio.imwrite(f"{save_dir}/step{step_idx:06d}_env{env_id}_rgb.png", rgb_np)
                 
-                # cam2
-                if camera2_available:
-                    rgb2 = camera2.data.output["rgb"][env_id].cpu().numpy()
-                    depth2 = camera2.data.output["depth"][env_id].squeeze(-1).cpu().numpy()
-                    
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam2_rgb.png", 
-                        rgb2
-                    )
-                    depth2_vis = (np.clip(depth2, 0, 10) / 10 * 255).astype(np.uint8)
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam2_depth.png", 
-                        depth2_vis
-                    )
-    
+                # Depth
+                depth_np = depth_all[env_id].squeeze(-1).cpu().numpy()
+                depth_vis = (np.clip(depth_np, 0, 10) / 10 * 255).astype(np.uint8)
+                imageio.imwrite(f"{save_dir}/step{step_idx:06d}_env{env_id}_depth.png", depth_vis)
+        
+        print(f"💾 Camera images will be saved to: {save_dir}")
+        print(f"   📷 每个step保存1个环境的图像")
+        print(f"   ⚠️  注意：会生成大量图片！")
 
     import inspect
     import shutil
@@ -256,7 +232,7 @@ def main(cfg: DictConfig):
         
         # 每个step保存相机图像
         if save_camera_images is not None:
-                save_camera_images(i)
+            save_camera_images(i)
 
         if aa.is_main_process():
             # print(OmegaConf.to_yaml({k: v for k, v in info.items() if (isinstance(v, (float, int)) and not k.startswith("performance_reward"))}))

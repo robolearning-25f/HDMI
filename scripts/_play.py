@@ -47,7 +47,7 @@ def main(cfg):
         import imageio
         import numpy as np
         
-        save_dir = "/home/jiting/workspace/data/hdmi/move_stereo_camera_steps"
+        save_dir = "/home/jiting/workspace/data/hdmi/push_stereo_camera_steps"
         os.makedirs(save_dir, exist_ok=True)
         
         if camera1_available:
@@ -322,6 +322,7 @@ def main(cfg):
             # td_.update(td["next"])
             episode_stats.add(td)
             
+            # 每帧保存相机图像
             if save_camera_images is not None:
                 save_camera_images(i)
 
