@@ -10,15 +10,8 @@ viewer:
   lookat: [0., -1., 0.5]
   eye: [2., -3, 2.]
 
-  # show training
-  # lookat: [0., 0., 0.]
-  # eye: [2.0, 2.0, 2.0]
-
-  # show ref contact pos
-  # lookat: [0., 1., 0.]
-  # eye: [0., -2., 1.]
-
 max_episode_length: 500
+enable_cameras: true
 
 robot:
   name: g1
@@ -28,12 +21,6 @@ robot:
       joint_pos:
         left_wrist_yaw_joint: -0.4
         right_wrist_yaw_joint: 0.4
-    # actuators:
-    #   arms:
-    #     stiffness:
-    #       ".*_wrist_roll_joint": 4.0
-    #       ".*_wrist_pitch_joint": 4.0
-    #       ".*_wrist_yaw_joint": 4.0
 
 command:
   data_path: data/motion/g1/omomo/sub1_suitcase_011
@@ -59,5 +46,3 @@ randomization:
   body_scale:
     name: "suitcase"
     scale_range: [0.9, 1.1]
-
-enable_cameras: true

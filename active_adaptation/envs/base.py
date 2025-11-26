@@ -1,8 +1,7 @@
-import torch
-import numpy as np
-import hydra
-import inspect
 import re
+import torch
+import hydra
+import numpy as np
 
 from tensordict.tensordict import TensorDictBase, TensorDict
 from torchrl.envs import EnvBase
@@ -14,7 +13,7 @@ from torchrl.data import (
 from collections import OrderedDict
 
 from abc import abstractmethod
-from typing import NamedTuple, Dict
+from typing import Dict
 import time
 
 import active_adaptation
@@ -66,45 +65,15 @@ class ObsGroup:
         return self._spec
 
     def compute(self, tensordict: TensorDictBase, timestamp: int) -> torch.Tensor:
-        # torch.compiler.cudagraph_mark_step_begin()
         output = self._compute()
         tensordict[self.name] = output
         return tensordict
     
-    # @torch.compile(mode="reduce-overhead")
     def _compute(self) -> torch.Tensor:
-        # if self.name == "amp_obs_" and not hasattr(self, "_exported"):
-        #     obs_metadata = []
-        #     for obs_key, func in self.funcs.items():
-        #         obs = func()
-        #         metadata = {
-        #             "obs_type": obs_key,
-        #             "obs_dim": obs.shape[-1],
-        #         }
-        #         if hasattr(func, "joint_names"):
-        #             metadata["joint_names"] = func.joint_names
-        #         if hasattr(func, "body_names"):
-        #             metadata["body_names"] = func.body_names
-        #         if hasattr(func, 'history_steps'):
-        #             metadata["history_steps"] = list(func.history_steps)
-        #         obs_metadata.append(metadata)
-
-        #     import os
-        #     metadata_folder = "amp_obs/policy"
-        #     metadata_path = f"{metadata_folder}/metadata.json"
-        #     os.makedirs(metadata_folder, exist_ok=True)
-        #     with open(metadata_path, 'w') as f:
-        #         import json
-        #         json.dump(obs_metadata, f, indent=2)
-        #     breakpoint()
-        #     self._exported = True
-        # update only if outdated
         tensors = []
-        # print(f"Computing observation group: {self.name}")
         for obs_key, func in self.funcs.items():
             tensor = func()
             tensors.append(tensor)
-            # print(f"\t{obs_key}: {tensor.shape}")
         return torch.cat(tensors, dim=-1)
     
     def symmetry_transforms(self):
@@ -118,7 +87,6 @@ class ObsGroup:
 
 class _Env(EnvBase):
     """
-    
     2024.10.10
     - disable delay
     - refactor flipping
@@ -168,15 +136,7 @@ class _Env(EnvBase):
             shape=[self.num_envs]
         ).to(self.device)
 
-        members = dict(inspect.getmembers(self.__class__, inspect.isclass))
         self.command_manager: mdp.Command = hydra.utils.instantiate(self.cfg.command, env=self)
-
-        # RAND_FUNCS = mdp.RAND_FUNCS
-        # RAND_FUNCS.update(mdp.get_obj_by_class(members, mdp.Randomization))
-        # TERM_FUNCS = mdp.TERM_FUNCS
-        # for k, v in inspect.getmembers(self.command_manager):
-        #     if getattr(v, "is_termination", False):
-        #         TERM_FUNCS[k] = mdp.termination_wrapper(v)
         ADDONS = mdp.ADDONS
 
         self.addons = OrderedDict()
@@ -192,7 +152,6 @@ class _Env(EnvBase):
         self._post_step_callbacks = []
 
         self._pre_step_callbacks.append(self.command_manager.step)
-        # self._update_callbacks.append(self.command_manager.update)
         self._reset_callbacks.append(self.command_manager.reset)
         self._debug_draw_callbacks.append(self.command_manager.debug_draw)
         
@@ -228,7 +187,7 @@ class _Env(EnvBase):
             self._update_callbacks.append(rand.update)
 
         for group_key, params in self.cfg.observation.items():
-            funcs = OrderedDict()            
+            funcs = OrderedDict()
             for obs_spec, kwargs in params.items():
                 obs_name, obs_cls_name = parse_name_and_class(obs_spec)
                 obs_cls = mdp.Observation.registry[obs_cls_name]

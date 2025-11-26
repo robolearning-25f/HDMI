@@ -142,7 +142,6 @@ class prev_actions(Observation):
         transform = self.action_manager.symmetry_transforms()
         return transform.repeat(self.steps)
 
-
 class applied_action(Observation):
     def __init__(self, env):
         super().__init__(env)
@@ -154,7 +153,6 @@ class applied_action(Observation):
     def symmetry_transforms(self):
         transform = self.action_manager.symmetry_transforms()
         return transform
-
 
 class applied_torque(Observation):
     def __init__(self, env, joint_names: str=".*"):
@@ -169,7 +167,6 @@ class applied_torque(Observation):
     def symmetry_transforms(self):
         transform = sym_utils.joint_space_symmetry(self.asset, self.joint_names)
         return transform
-
 
 class last_contact(Observation):
     def __init__(self, env, body_names: str):
@@ -212,7 +209,6 @@ class last_contact(Observation):
                 torch.where(self.has_contact, self.last_contact_pos_w, self.body_pos_w) - self.body_pos_w
             )
 
-
 class jacobians_b(Observation):
     """The jacobians relative to the root link in body frame. The shape of returned jacobian is (num_envs, num_bodies * 6 * num_joints)"""
     def __init__(self, env, body_names: str, joint_names: str):
@@ -241,7 +237,6 @@ class jacobians_b(Observation):
         # breakpoint()
 
         return jacobian_b.reshape(self.num_envs, -1)
-
 
 class random_noise_placeholder(Observation):
     def __init__(self, env, dim: int, noise_std: float=1.0):
