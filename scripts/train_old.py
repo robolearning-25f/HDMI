@@ -65,76 +65,6 @@ def main(cfg: DictConfig):
     run.save(os.path.join(run.dir, "config.yaml"), policy="now")
 
     env, policy, vecnorm = make_env_policy(cfg)
-    
-    # Debug: Print available body names for camera mounting
-    if aa.is_main_process():
-        print("\n" + "="*80)
-        print("Available body names for camera mounting:")
-        print("="*80)
-        for i, body_name in enumerate(env.scene["robot"].body_names):
-            print(f"{i:3d}. {body_name}")
-        print("="*80 + "\n")
-    
-    save_camera_images = None
-    camera1_available = "tiled_camera1" in env.scene.sensors
-    camera2_available = "tiled_camera2" in env.scene.sensors
-    
-    if camera1_available or camera2_available:
-        import imageio
-        import numpy as np
-        
-        save_dir = "./push_stereo_camera_steps"
-        os.makedirs(save_dir, exist_ok=True)
-        
-        if camera1_available:
-            camera1 = env.scene.sensors["tiled_camera1"]
-            print(f"    Camera 1 found!")
-            print(f"   - Prim path: {camera1.cfg.prim_path}")
-            print(f"   - Resolution: {camera1.cfg.width}x{camera1.cfg.height}")
-            print(f"   - Position offset: {camera1.cfg.offset.pos}")
-        
-        if camera2_available:
-            camera2 = env.scene.sensors["tiled_camera2"]
-            print(f"    Camera 2 found!")
-            print(f"   - Prim path: {camera2.cfg.prim_path}")
-            print(f"   - Resolution: {camera2.cfg.width}x{camera2.cfg.height}")
-            print(f"   - Position offset: {camera2.cfg.offset.pos}")
-        
-        def save_camera_images(step_idx, num_envs_to_save=1):
-            if not aa.is_main_process():
-                return
-            
-            for env_id in range(num_envs_to_save):
-                # cam1
-                if camera1_available:
-                    rgb1 = camera1.data.output["rgb"][env_id].cpu().numpy()
-                    depth1 = camera1.data.output["depth"][env_id].squeeze(-1).cpu().numpy()
-                    
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam1_rgb.png", 
-                        rgb1
-                    )
-                    depth1_vis = (np.clip(depth1, 0, 10) / 10 * 255).astype(np.uint8)
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam1_depth.png", 
-                        depth1_vis
-                    )
-                
-                # cam2
-                if camera2_available:
-                    rgb2 = camera2.data.output["rgb"][env_id].cpu().numpy()
-                    depth2 = camera2.data.output["depth"][env_id].squeeze(-1).cpu().numpy()
-                    
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam2_rgb.png", 
-                        rgb2
-                    )
-                    depth2_vis = (np.clip(depth2, 0, 10) / 10 * 255).astype(np.uint8)
-                    imageio.imwrite(
-                        f"{save_dir}/step{step_idx:06d}_env{env_id}_cam2_depth.png", 
-                        depth2_vis
-                    )
-    
 
     import inspect
     import shutil
@@ -253,10 +183,6 @@ def main(cfg: DictConfig):
 
         if should_save(i):
             save(policy, f"checkpoint_{i}")
-        
-        # 每个step保存相机图像
-        if save_camera_images is not None:
-                save_camera_images(i)
 
         if aa.is_main_process():
             # print(OmegaConf.to_yaml({k: v for k, v in info.items() if (isinstance(v, (float, int)) and not k.startswith("performance_reward"))}))
@@ -286,3 +212,4 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
+
