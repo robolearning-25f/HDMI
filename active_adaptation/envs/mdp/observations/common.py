@@ -1,3 +1,4 @@
+import rerun as rr
 from active_adaptation.envs.mdp.base import Observation
 import active_adaptation.utils.symmetry as sym_utils
 
@@ -367,6 +368,9 @@ class rgb_camera(Observation):
         rgb = self.buffer[torch.arange(self.num_envs, device=self.device), self.delay, :, :, :3]
         if self.noise_std > 0:
             rgb = rgb + torch.randn_like(rgb) * self.noise_std
-        # return channel-first: [N, 3, H, W]
+
+        rr.log("/image_samp_0", rr.Image(rgb.cpu()[0].numpy()))
+        rr.log("/image_samp_1", rr.Image(rgb.cpu()[1].numpy()))
         
+        # return channel-first: [N, 3, H, W]        
         return rgb.permute(0, 3, 1, 2)

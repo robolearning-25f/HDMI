@@ -1,5 +1,6 @@
 import torch
 import hydra
+import rerun as rr
 from omegaconf import OmegaConf
 from isaaclab.app import AppLauncher
 from torchrl.envs.utils import set_exploration_type, ExplorationType
@@ -10,6 +11,8 @@ from scripts.helpers import make_env_policy
 def main(cfg):
     OmegaConf.resolve(cfg)
     OmegaConf.set_struct(cfg, False)
+    rr.init("HDMI Humanoid Policy", spawn=False)
+    rr.connect_grpc()
     
     app_launcher = AppLauncher(cfg.app)
     simulation_app = app_launcher.app
