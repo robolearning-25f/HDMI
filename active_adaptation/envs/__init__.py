@@ -1,2 +1,2 @@
 from .mujoco import MJArticulationCfg
-from .locomotion import SimpleEnv
+from .locomotion import SimpleEnv, PerceptualSimpleEnv
