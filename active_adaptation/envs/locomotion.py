@@ -207,9 +207,6 @@ class PerceptualSimpleEnv(SimpleEnv):
     def __init__(self, cfg):
         cfg.enable_cameras = True
         super().__init__(cfg)
-    
-    @property
-    def need_render(self) -> bool: return True
 
     def _camera_prim_path(self) -> str:
         return "/World/envs/env_.*/Robot/head_link/perceptual_camera"
