@@ -1,11 +1,7 @@
+import os, re
 import torch
 import hydra
 import numpy as np
-import einops
-import itertools
-import os
-import datetime
-import re
 from omegaconf import OmegaConf
 
 from isaaclab.app import AppLauncher
@@ -257,5 +253,5 @@ def main(cfg):
     simulation_app.close()
 
 
-if __name__ == "__main__":
-    main()
+
+if __name__ == "__main__": main()
