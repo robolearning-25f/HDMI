@@ -4,6 +4,7 @@ import hydra
 import inspect
 import re
 
+from PIL import Image
 from tensordict.tensordict import TensorDictBase, TensorDict
 from torchrl.envs import EnvBase
 from torchrl.data import (
@@ -479,7 +480,8 @@ class _Env(EnvBase):
             for callback in self._pre_step_callbacks:
                 callback(substep)
             self.scene.write_data_to_sim()
-            self.sim.step(render=False)
+            self.sim.step(render=True)
+            Image.fromarray(self.scene["tiled_camera"].data.output["rgb"].cpu().numpy()[0]).save(f'cam1_{substep}.png')
             self.scene.update(self.physics_dt)
             for callback in self._post_step_callbacks:
                 callback(substep)

@@ -20,6 +20,8 @@ viewer:
 
 max_episode_length: 500
 
+num_envs: 1
+
 robot:
   name: g1
   robot_type: g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule

@@ -13,7 +13,7 @@ app:
 
 # total_frames: 300_000_000
 total_frames: 150_000_000
-eval_render: false
+eval_render: true
 save_interval: 300
 seed: 0
 checkpoint_path: null

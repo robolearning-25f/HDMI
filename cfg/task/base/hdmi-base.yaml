@@ -112,7 +112,7 @@ command:
     - [0.0, 0.0, 0.0]
 
 
-enable_cameras: false
+enable_cameras: true
 camera_width: 160
 camera_height: 120
 # Common Observation section
