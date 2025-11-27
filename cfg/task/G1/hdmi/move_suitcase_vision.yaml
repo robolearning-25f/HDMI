@@ -1,0 +1,112 @@
+# @package task
+# Vision-based tracking example for suitcase task
+defaults:
+  - base/hdmi-base
+  - _self_
+
+name: G1TrackSuitcaseVision
+
+viewer:
+  lookat: [0., -1., 0.5]
+  eye: [2., -3, 2.]
+
+max_episode_length: 500
+
+num_envs: 4
+
+# Enable cameras for vision tracking
+enable_cameras: true
+camera_width: 640
+camera_height: 480
+
+robot:
+  name: g1
+  robot_type: g1_29dof_rubberhand-feet_sphere-eef_box-body_capsule
+  override_params:
+    init_state:
+      joint_pos:
+        left_wrist_yaw_joint: -0.4
+        right_wrist_yaw_joint: 0.4
+
+# Use vision-based tracking command manager
+command:
+  _target_: active_adaptation.envs.mdp.commands.hdmi.vision_command.RobotObjectVisionTracking
+
+  # Motion data
+  data_path: data/motion/g1/omomo/sub1_suitcase_011
+  root_body_name: "pelvis"
+
+  # Object configuration
+  object_asset_name: "suitcase"
+  object_body_name: "suitcase"
+
+  contact_target_pos_offset:
+    - [-0.1, 0.18, 0.25]
+    - [-0.1, -0.18, 0.25]
+  contact_eef_pos_offset:
+    - [0.05, 0.0, 0.0]
+    - [0.05, 0.0, 0.0]
+
+  # Vision tracking parameters (new)
+  use_vision_tracking: true
+  vision_observation_name: "cotracker_object_position"
+  vision_tracking_delay: 0  # Frames of delay to simulate processing time
+  blend_vision_ground_truth: false  # If true, blend vision and ground truth
+  vision_weight: 1.0  # Weight for vision (1.0 = pure vision, 0.0 = pure ground truth)
+
+observation:
+  # Vision-based observations
+  vision:
+    cotracker_object_position:
+      _target_: active_adaptation.envs.mdp.observations.vision_tracking.cotracker_object_position
+      camera_name: "tiled_camera"
+      num_tracking_points: 16
+      grid_size: 4
+      use_cotracker: true  # Set to false to use simple template matching
+      cotracker_checkpoint: null  # Path to CoTracker checkpoint, or null for default
+      reinit_on_lost_tracking: true
+      min_visible_points: 4
+      use_depth_for_3d: true
+      noise_std: 0.01
+      episodic_noise_std: 0.02
+
+    # Optional: also observe raw tracked points
+    # cotracker_tracked_points_3d:
+    #   _target_: active_adaptation.envs.mdp.observations.vision_tracking.cotracker_tracked_points_3d
+    #   camera_name: "tiled_camera"
+    #   num_tracking_points: 16
+    #   grid_size: 4
+
+  # Depth camera observation (optional, can be used alongside vision tracking)
+  # depth:
+  #   depth_camera:
+  #     camera_name: "tiled_camera"
+
+  # Standard proprioceptive observations (unchanged)
+  proprioception:
+    # ... (keep existing proprioception observations)
+
+  # Object observations - these will now use vision-based tracking
+  # when use_vision_tracking is enabled in the command manager
+  object:
+    object_xy_b:
+      noise_std: 0.01
+      episodic_noise_std: 0.0
+    object_heading_b:
+      noise_std: 0.01
+      episodic_noise_std: 0.0
+    ref_contact_pos_b:
+      noise_std: 0.01
+      episodic_noise_std: 0.02
+      yaw_only: true
+
+randomization:
+  object_body_randomization:
+    static_dynamic_friction_ratio_range: [1.0, 2.0]
+    dynamic_friction_range: [0.3, 0.8]
+    restitution_range: [0.0, 0.2]
+    mass_range: [1.2, 1.8]
+
+  body_scale:
+    name: "suitcase"
+    scale_range: [0.9, 1.1]
