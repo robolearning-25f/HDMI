@@ -3,8 +3,10 @@ import numpy as np
 import hydra
 import inspect
 import re
-
+import os
+import json
 from PIL import Image
+
 from tensordict.tensordict import TensorDictBase, TensorDict
 from torchrl.envs import EnvBase
 from torchrl.data import (
@@ -318,7 +320,7 @@ class _Env(EnvBase):
         self.timestamp = 0
 
         self.stats = self.reward_spec["stats"].zero()
-    
+
         self.input_tensordict = None
         self.extra = {}
         self.reset_time = 0.
@@ -329,6 +331,16 @@ class _Env(EnvBase):
         self.termination_time = 0.
         self.observation_time = 0.
         self.ema_cnt = 0.
+
+        # Video recording setup
+        self.frame_id = 0
+        self.visualization_dir = "visualization"
+
+        # Create visualization directories if cameras are enabled
+        if self.cfg.get("enable_cameras", False):
+            os.makedirs(os.path.join(self.visualization_dir, "rgb"), exist_ok=True)
+            os.makedirs(os.path.join(self.visualization_dir, "depth"), exist_ok=True)
+            os.makedirs(os.path.join(self.visualization_dir, "extrinsics"), exist_ok=True)
         
     def set_progress(self, progress: int):
         self.current_iter = progress
@@ -481,10 +493,21 @@ class _Env(EnvBase):
                 callback(substep)
             self.scene.write_data_to_sim()
             self.sim.step(render=True)
-            Image.fromarray(self.scene["tiled_camera"].data.output["rgb"].cpu().numpy()[0]).save(f'cam1_{substep}.png')
+
+            # Save camera data only for the last substep (every frame)
+            if (self.cfg.get("enable_cameras", False) and
+                "tiled_camera" in self.scene.sensors and
+                substep == self.decimation - 1):
+                self._save_camera_frame()
+
             self.scene.update(self.physics_dt)
             for callback in self._post_step_callbacks:
                 callback(substep)
+
+        # Increment frame counter after all substeps
+        if self.cfg.get("enable_cameras", False):
+            self.frame_id += 1
+
         end = time.perf_counter()
         self.simulation_time = self.simulation_time * self._stats_ema_decay + (end - start)
         self.discount.fill_(1.0)
@@ -553,6 +576,68 @@ class _Env(EnvBase):
         # import omni.replicator.core as rep
         # rep.set_global_seed(seed)
         torch.manual_seed(seed)
+
+    def _save_camera_frame(self):
+        """Save camera RGB, depth, and extrinsics for the current frame."""
+        try:
+            from isaaclab.sensors import TiledCamera
+            tiled_camera: TiledCamera = self.scene.sensors["tiled_camera"]
+
+            # Get camera data (first environment)
+            rgb = tiled_camera.data.output["rgb"][0].cpu().numpy()[:, :, :3]  # (H, W, 3)
+            depth = tiled_camera.data.output["distance_to_image_plane"][0].cpu().numpy()  # (H, W, 1)
+            depth = depth.squeeze(-1)  # (H, W)
+
+            # Get camera pose (extrinsics) - world to camera transform
+            # Camera pose is stored as position and quaternion
+            cam_pos = tiled_camera.data.pos_w[0].cpu().numpy()  # (3,)
+            cam_quat = tiled_camera.data.quat_w_ros[0].cpu().numpy()  # (4,) in ROS convention (x, y, z, w)
+
+            # Convert quaternion to rotation matrix
+            from scipy.spatial.transform import Rotation
+            rotation = Rotation.from_quat(cam_quat)  # scipy expects (x, y, z, w)
+            R = rotation.as_matrix()  # (3, 3)
+
+            # Create 4x4 extrinsics matrix (camera to world)
+            extrinsics = np.eye(4)
+            extrinsics[:3, :3] = R
+            extrinsics[:3, 3] = cam_pos
+
+            # Save RGB as PNG
+            rgb_path = os.path.join(self.visualization_dir, "rgb", f"cam1_{self.frame_id}.png")
+            Image.fromarray(rgb.astype(np.uint8)).save(rgb_path)
+
+            # Save depth as NPY
+            depth_path = os.path.join(self.visualization_dir, "depth", f"depth_{self.frame_id}.npy")
+            np.save(depth_path, depth)
+
+            # Save extrinsics as NPY
+            extrinsics_path = os.path.join(self.visualization_dir, "extrinsics", f"extrinsics_{self.frame_id}.npy")
+            np.save(extrinsics_path, extrinsics)
+
+            # Save metadata with intrinsics (only once)
+            metadata_path = os.path.join(self.visualization_dir, "metadata.json")
+            if not os.path.exists(metadata_path):
+                # Get intrinsics from camera config
+                # Isaac Lab cameras store intrinsic matrix
+                intrinsic_matrix = tiled_camera.data.intrinsic_matrices[0].cpu().numpy()  # (3, 3)
+
+                metadata = {
+                    "intrinsics": intrinsic_matrix.tolist(),
+                    "width": int(tiled_camera.cfg.width),
+                    "height": int(tiled_camera.cfg.height),
+                    "fps": int(1.0 / self.step_dt),
+                    "description": "Camera visualization data"
+                }
+
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                print(f"Saved metadata to {metadata_path}")
+
+        except Exception as e:
+            print(f"Error saving camera frame {self.frame_id}: {e}")
+            import traceback
+            traceback.print_exc()
 
     def render(self, mode: str = "human"):
         self.sim.render()
