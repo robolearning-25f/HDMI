@@ -3,8 +3,6 @@ import torch.nn as nn
 import hydra
 import numpy as np
 import time
-import wandb
-import logging
 import os
 import datetime
 
@@ -14,10 +12,8 @@ from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.envs.transforms import VecNorm
 
 from termcolor import colored
-from collections import OrderedDict
 import imageio
 from omegaconf import OmegaConf, DictConfig
-import active_adaptation.learning
 from active_adaptation.utils.wandb import parse_checkpoint_path
 import active_adaptation
 if TYPE_CHECKING:
@@ -114,7 +110,7 @@ class EpisodeStats:
 
 def make_env_policy(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
-    from active_adaptation.envs import SimpleEnv
+    from active_adaptation.envs import PerceptualSimpleEnv
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, VecNorm, StepCounter
     
     policy_in_keys = cfg.algo.get("in_keys", ["policy", "priv"])
@@ -127,7 +123,8 @@ def make_env_policy(cfg: DictConfig):
             cfg.task.observation.pop(obs_group_key)
             print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
 
-    base_env = SimpleEnv(cfg.task)
+    # If you don't need camera you can use SimpleEnv instead.
+    base_env = PerceptualSimpleEnv(cfg.task)
 
     checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
     if checkpoint_path is not None:
@@ -374,4 +371,3 @@ def plot_obs_histogram(
     plt.tight_layout()
     plt.savefig(os.path.join(os.path.dirname(__file__), "trajs_obs_hist.png"))
     plt.close()
-    

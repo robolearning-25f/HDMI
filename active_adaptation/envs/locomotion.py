@@ -43,7 +43,7 @@ class SimpleEnv(_Env):
             import isaaclab.sim as sim_utils
             from isaaclab.scene import InteractiveSceneCfg
             from isaaclab.assets import AssetBaseCfg, ArticulationCfg
-            from isaaclab.sensors import ContactSensorCfg
+            from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
             from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
             from active_adaptation.assets import ROBOTS, OBJECTS, get_asset_meta
             from active_adaptation.envs.terrain import TERRAINS
@@ -116,60 +116,9 @@ class SimpleEnv(_Env):
                 track_air_time=True
             )
 
-            if self.cfg.get("enable_cameras", False):
-                from isaaclab.sensors import TiledCameraCfg
-                # this is from my ros reading
-                # camera_spawn_cfg = sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
-                #     intrinsic_matrix=[
-                #         390.2486572265625, 0.0, 324.02740478515625,
-                #         0.0, 390.2486572265625, 234.0133056640625,
-                #         0.0, 0.0, 1.0,
-                #     ],
-                #     width=640,
-                #     height=480,
-                #     clipping_range=(0.1, 4.0),
-                #     focal_length=None,
-                #     focus_distance=400.0,
-                #     f_stop=0.0,
-                #     projection_type="pinhole",
-                #     lock_camera=True,
-                # )
-                # from https://github.com/unitreerobotics/unitree_sim_isaaclab/blob/27498c09159a99879a882e212059988df86018c8/tasks/common_config/camera_configs.py#L21
-                camera_spawn_cfg = sim_utils.PinholeCameraCfg(
-                    focal_length=7.6,
-                    focus_distance=400.0,
-                    horizontal_aperture=20.0,
-                    clipping_range=(0.1, 1.0e5),
-                )
-                tiled_camera: TiledCameraCfg = TiledCameraCfg(
-                    prim_path="/World/envs/env_.*/Robot/d435_link/front_cam",
-                    spawn=camera_spawn_cfg,
-                    offset=TiledCameraCfg.OffsetCfg(
-                        pos=(0.0, 0.0, 0.0),
-                        rot=(0.5, -0.5, 0.5, -0.5),
-                        convention="ros"
-                    ),
-                    # NOTE: remove rgb does not improve speed, and only slightly reduces memory usage
-                    # TODO: depth or distance_to_image_plane?
-                    data_types=["rgb", "depth", "distance_to_image_plane"],
-                    update_latest_camera_pose=True,
-                    update_period=0.02,
-                    width=self.cfg.camera_width,
-                    height=self.cfg.camera_height,
-                )
-                scene_cfg.tiled_camera = tiled_camera
-            
-            # if self.cfg.get("enable_raycaster", False):
-            #     from isaaclab.sensors import RayCasterCfg
-            #     raycaster = RayCasterCfg(
-            #         prim_path="/World/envs/env_.*/Robot/d435_link/front_cam",
-            #         update_period=0.02,
-            #         offset=RayCasterCfg.OffsetCfg(
-            #             pos=(0.0, 0.0, 0.0),
-            #             rot=(0.5, -0.5, 0.5, -0.5),
-            #         ),
-            #     )
-            #     scene_cfg.raycaster = raycaster
+            tiled_camera_cfg = self._create_tiled_camera_cfg(sim_utils, TiledCameraCfg)
+            if tiled_camera_cfg is not None:
+                scene_cfg.tiled_camera = tiled_camera_cfg
             
             sim_cfg = sim_utils.SimulationCfg(
                 dt=self.cfg.sim.isaac_physics_dt,
@@ -183,14 +132,10 @@ class SimpleEnv(_Env):
             )
             
             # slightly reduces GPU memory usage
-            # sim_cfg.physx.gpu_max_rigid_contact_count = 2**21
-            # sim_cfg.physx.gpu_max_rigid_patch_count = 2**21
             sim_cfg.physx.gpu_found_lost_pairs_capacity = 2538320 # 2**20
             sim_cfg.physx.gpu_found_lost_aggregate_pairs_capacity = 61999079 # 2**26
             sim_cfg.physx.gpu_total_aggregate_pairs_capacity = 2**23
             sim_cfg.physx.enable_stabilization = False
-            # sim_cfg.physx.gpu_collision_stack_size = 2**25
-            # sim_cfg.physx.gpu_heap_capacity = 2**24
             
             self.sim, self.scene = scene.create_isaaclab_sim_and_scene(sim_cfg, scene_cfg)
 
@@ -202,16 +147,10 @@ class SimpleEnv(_Env):
                 self._render_product = rep.create.render_product(
                     "/OmniverseKit_Persp", tuple(self.cfg.viewer.resolution)
                 )
+                
                 # create rgb annotator -- used to read data from the render product
                 self._rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
                 self._rgb_annotator.attach([self._render_product])
-                # self._seg_annotator = rep.AnnotatorRegistry.get_annotator(
-                #     "instance_id_segmentation_fast", 
-                #     device="cpu",
-                # )
-                # self._seg_annotator.attach([self._render_product])
-                # for _ in range(4):
-                #     self.sim.render()
             except ModuleNotFoundError as e:
                 print("Set app.enable_cameras=true to use cameras.")
             
@@ -227,6 +166,7 @@ class SimpleEnv(_Env):
             print(f"Saving asset meta to {path}")
             with open(path, "w") as f:
                 json.dump(asset_meta, f, indent=4)
+        
         else:
             from active_adaptation.envs.mujoco import MJScene, MJSim
             from active_adaptation.assets_mjcf import ROBOTS
@@ -257,3 +197,50 @@ class SimpleEnv(_Env):
         # )
         return super().render(mode)
 
+    def _create_tiled_camera_cfg(self, sim_utils, TiledCameraCfg):
+        return None
+
+
+class PerceptualSimpleEnv(SimpleEnv):
+    """SimpleEnv variant that always mounts a tiled RGB-D camera on the humanoid head."""
+
+    def __init__(self, cfg):
+        cfg.enable_cameras = True
+        super().__init__(cfg)
+    
+    @property
+    def need_render(self) -> bool: return True
+
+    def _camera_prim_path(self) -> str:
+        return "/World/envs/env_.*/Robot/head_link/perceptual_camera"
+
+    def _camera_offset(self):
+        # Place the camera slightly forward and above the head so it looks ahead.
+        return (0.18, 0.0, 0.08), (0.5, -0.5, 0.5, -0.5)
+
+    def _create_tiled_camera_cfg(self, sim_utils, TiledCameraCfg):
+        if not self.cfg.get("enable_cameras", False):
+            return None
+
+        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
+            focal_length=7.6,
+            focus_distance=400.0,
+            horizontal_aperture=20.0,
+            clipping_range=(0.1, 1.0e5),
+        )
+
+        pos_offset, rot_offset = self._camera_offset()
+        return TiledCameraCfg(
+            prim_path=self._camera_prim_path(),
+            spawn=camera_spawn_cfg,
+            offset=TiledCameraCfg.OffsetCfg(
+                pos=pos_offset,
+                rot=rot_offset,
+                convention="ros"
+            ),
+            data_types=["rgb", "depth", "distance_to_image_plane"],
+            update_latest_camera_pose=True,
+            update_period=0.02,
+            width=self.cfg.camera_width,
+            height=self.cfg.camera_height,
+        )

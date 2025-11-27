@@ -24,9 +24,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as D
 import warnings
-import functools
 import torch.utils._pytree as pytree
 
 from torchrl.data import CompositeSpec, TensorSpec
@@ -37,7 +35,6 @@ from tensordict.nn import (
     TensorDictModuleBase,
     TensorDictModule,
     TensorDictSequential,
-    CudaGraphModule
 )
 
 from hydra.core.config_store import ConfigStore

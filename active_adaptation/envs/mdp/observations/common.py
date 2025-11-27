@@ -1,3 +1,4 @@
+import rerun as rr
 from active_adaptation.envs.mdp.base import Observation
 import active_adaptation.utils.symmetry as sym_utils
 
@@ -142,7 +143,6 @@ class prev_actions(Observation):
         transform = self.action_manager.symmetry_transforms()
         return transform.repeat(self.steps)
 
-
 class applied_action(Observation):
     def __init__(self, env):
         super().__init__(env)
@@ -154,7 +154,6 @@ class applied_action(Observation):
     def symmetry_transforms(self):
         transform = self.action_manager.symmetry_transforms()
         return transform
-
 
 class applied_torque(Observation):
     def __init__(self, env, joint_names: str=".*"):
@@ -169,7 +168,6 @@ class applied_torque(Observation):
     def symmetry_transforms(self):
         transform = sym_utils.joint_space_symmetry(self.asset, self.joint_names)
         return transform
-
 
 class last_contact(Observation):
     def __init__(self, env, body_names: str):
@@ -212,7 +210,6 @@ class last_contact(Observation):
                 torch.where(self.has_contact, self.last_contact_pos_w, self.body_pos_w) - self.body_pos_w
             )
 
-
 class jacobians_b(Observation):
     """The jacobians relative to the root link in body frame. The shape of returned jacobian is (num_envs, num_bodies * 6 * num_joints)"""
     def __init__(self, env, body_names: str, joint_names: str):
@@ -241,7 +238,6 @@ class jacobians_b(Observation):
         # breakpoint()
 
         return jacobian_b.reshape(self.num_envs, -1)
-
 
 class random_noise_placeholder(Observation):
     def __init__(self, env, dim: int, noise_std: float=1.0):
@@ -341,3 +337,40 @@ class depth_camera(Observation):
         depth_img.nan_to_num_(nan=self.nan_to_num, posinf=self.max_depth, neginf=self.min_depth)
         depth_img.clamp_(min=self.min_depth, max=self.max_depth)
         return depth_img.unsqueeze(1) # [N, 1, H, W]
+
+class rgb_camera(Observation):
+    def __init__(self, env, camera_name: str, noise_std: float = 0.0, delay_range=(0, 0)):
+        super().__init__(env)
+        # Works with either TiledCamera or PinholeCamera as long as it exposes .data.output["rgba"]
+        self.camera = self.env.scene.sensors[camera_name]
+        self.noise_std = noise_std
+        self.delay_range = delay_range
+        self.delay = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.buffer = torch.zeros(
+            (self.num_envs, delay_range[1] + 1, *self.camera.image_shape, 4),
+            device=self.device,
+        )
+
+    def reset(self, env_ids):
+        if self.delay_range != (0, 0):
+            self.delay[env_ids] = torch.randint(
+                low=self.delay_range[0],
+                high=self.delay_range[1] + 1,
+                size=(len(env_ids),),
+                device=self.device,
+                dtype=self.delay.dtype,
+            )
+
+    def compute(self):
+        rgba = self.camera.data.output["rgba"]  # [N, H, W, 4]
+        self.buffer = self.buffer.roll(1, dims=1)
+        self.buffer[:, 0] = rgba
+        rgb = self.buffer[torch.arange(self.num_envs, device=self.device), self.delay, :, :, :3]
+        if self.noise_std > 0:
+            rgb = rgb + torch.randn_like(rgb) * self.noise_std
+
+        rr.log("/image_samp_0", rr.Image(rgb.cpu()[0].numpy()))
+        rr.log("/image_samp_1", rr.Image(rgb.cpu()[1].numpy()))
+        
+        # return channel-first: [N, 3, H, W]        
+        return rgb.permute(0, 3, 1, 2)
