@@ -6,7 +6,7 @@ headless: false
 
 app:
   headless: ${..headless}
-  enable_cameras: false
+  enable_cameras: true
 
 total_frames: -1
 max_iters: -1
