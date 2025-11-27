@@ -22,9 +22,9 @@ setup(
         "onnxscript==0.3.0",
         "onnxruntime==1.22.0",
         "torch==2.7.0",
-        # "torch==2.8.0",
-        # "torchvision",
+        "rerun_sdk<0.27",
         "torchrl==0.7.0",
         "tensordict==0.7.0",
+        "numpy==1.26.0"
     ],
 )

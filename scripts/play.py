@@ -1,11 +1,7 @@
+import os, re
 import torch
 import hydra
 import numpy as np
-import einops
-import itertools
-import os
-import datetime
-import re
 from omegaconf import OmegaConf
 
 from isaaclab.app import AppLauncher
@@ -243,20 +239,19 @@ def main(cfg):
     assert not env.base_env.training
     with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
         torch.compiler.cudagraph_mark_step_begin()
-        for i in itertools.count():
+        
+        while True:
             td_ = rollout_policy(td_)
             td, td_ = env.step_and_maybe_reset(td_)
-            # td_.update(td["next"])
             episode_stats.add(td)
 
             if len(episode_stats) >= env.num_envs:
-                print("Step", i)
-                for k, v in sorted(episode_stats.pop().items(True, True)):
-                    print(k, torch.mean(v).item())
+                print("Done")
+                break
     
     env.close()
     simulation_app.close()
 
 
-if __name__ == "__main__":
-    main()
+
+if __name__ == "__main__": main()
