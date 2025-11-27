@@ -192,3 +192,5 @@ scripts/images
 checkpoint*.pt
 test/
 *.csv
+
+inf_log/
