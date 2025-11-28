@@ -310,6 +310,7 @@ class PPOROA(TensorDictModuleBase):
 
         self.action_dim = action_spec.shape[-1]
         self.joint_names = env.action_manager.joint_names
+        # import ipdb; ipdb.set_trace()
         self.priv_available = observation_spec.get(OBS_PRIV_KEY, None) is not None
         if self.cfg.phase == "train" and not self.priv_available:
             raise KeyError("Training phase requires priv observations, but OBS_PRIV_KEY is missing.")
