@@ -780,10 +780,10 @@ class RobotObjectTracking(RobotTracking):
         out_of_range_mask = ~self.ref_object_contact[:, None, :, None].expand_as(self.eef_contact_markers_pos_w)
         self.eef_contact_markers_pos_w[out_of_range_mask] = -1000.0
         
-        self.eef_contact_markers.visualize(
-            translations=self.eef_contact_markers_pos_w.view(-1, 3),
-            marker_indices=self.eef_contact_markers_indices,
-        )
+        # self.eef_contact_markers.visualize(
+        #     translations=self.eef_contact_markers_pos_w.view(-1, 3),
+        #     marker_indices=self.eef_contact_markers_indices,
+        # )
 
         # update and visualize contact target markers so cameras can see them
         self.contact_target_markers_pos_w[:] = self.contact_target_pos_w
