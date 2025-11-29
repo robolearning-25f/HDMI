@@ -172,6 +172,7 @@ artifacts/
 # assets
 *.ipynb
 *.mp4
+*.zip
 
 # local scripts
 *.sh
@@ -192,3 +193,5 @@ scripts/images
 checkpoint*.pt
 test/
 *.csv
+
+inf_log/

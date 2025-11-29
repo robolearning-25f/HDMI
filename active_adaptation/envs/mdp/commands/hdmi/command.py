@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.sensors import ContactSensor
     from isaaclab.assets import Articulation, RigidObject
-
+# from active_adaptation.utils.math import yaw_from_quat
 import torch
 import numpy as np
 from isaaclab.utils.math import sample_uniform, quat_from_euler_xyz, quat_mul, quat_apply, quat_apply_inverse
@@ -13,6 +13,12 @@ from tensordict import TensorDict
 from active_adaptation.utils.math import batchify
 quat_apply = batchify(quat_apply)
 quat_apply_inverse = batchify(quat_apply_inverse)
+from active_adaptation.utils.math import quat_rotate_inverse
+import active_adaptation as aa
+import imageio
+import os, json, math
+import numpy as np
+
 torch.set_printoptions(precision=3, sci_mode=False, linewidth=120)
 
 class RobotTracking(Command):
@@ -318,6 +324,7 @@ class RobotTracking(Command):
         self.all_marker_pos_w = torch.zeros(2, self.num_envs, self.num_tracking_bodies, 3, device=self.device)
 
     def debug_draw(self):
+        return
         if self.env.backend != "isaac":
             return
 
@@ -397,6 +404,11 @@ class RobotObjectTracking(RobotTracking):
             "contact_eef_body_name, contact_target_pos_offset, and contact_eef_pos_offset must have the same length"
         self.num_eefs = len(contact_eef_body_name)
         self.contact_eef_body_indices_asset = [self.asset.body_names.index(name) for name in contact_eef_body_name]
+        # head link index for camera pose reconstruction (used in logging)
+        try:
+            self.head_body_idx = self.asset.body_names.index("head_link")
+        except ValueError:
+            self.head_body_idx = None
 
         self.eef_filtered_sensor: List[List[ContactSensor]] = []
         # [self.env.scene.sensors[f"{eef_name}_{object_asset_name}_contact_forces"] for eef_name in contact_eef_body_name] for object_asset_name in self.asset.data.object_names]
@@ -569,9 +581,13 @@ class RobotObjectTracking(RobotTracking):
         
         # contact target and eef pos
         object_pos_w = self.object.data.body_link_pos_w[:, self.object_body_id_asset]
+        print(f"object_pos_w: {object_pos_w[0]}")
         object_quat_w = self.object.data.body_link_quat_w[:, self.object_body_id_asset]
+        print(f"object_quat_w: {object_quat_w[0]}")
+        # print(f"object_heading_w: {yaw_from_quat(object_quat_w)[0]}")
         self.contact_target_pos_w[:] = object_pos_w.unsqueeze(1) + quat_apply(object_quat_w.unsqueeze(1), self.contact_target_pos_offset)
-        
+        print(f"contact_target_pos_w: {self.contact_target_pos_w[0]}")
+        print("\n")
         eef_pos_w = self.asset.data.body_link_pos_w[:, self.contact_eef_body_indices_asset]
         eef_quat_w = self.asset.data.body_link_quat_w[:, self.contact_eef_body_indices_asset]
         self.contact_eef_pos_w[:] = eef_pos_w + quat_apply(eef_quat_w, self.contact_eef_pos_offset)
@@ -582,6 +598,121 @@ class RobotObjectTracking(RobotTracking):
                 self.eef_contact_forces_w[:, eef_idx] += eef_sensor.data.force_matrix_w[:, eef_sensor_id, 0]
 
         self.eef_contact_forces_b[:] = quat_apply_inverse(object_quat_w.unsqueeze(1), self.eef_contact_forces_w)
+
+        if aa.is_main_process():
+            # log RGB-D and object/contact info for env 0
+            env_id = 0
+            log_root = os.path.join(os.getcwd(), "inf_log")
+            os.makedirs(log_root, exist_ok=True)
+            ts = getattr(self.env, "timestamp", 0)
+            step_dir = os.path.join(log_root, f"step_{int(ts):06d}")
+            os.makedirs(step_dir, exist_ok=True)
+
+            def _yaw_from_quat(q: torch.Tensor):
+                qw, qx, qy, qz = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+                return math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+
+            obj_pos_w = self.object_pos_w[env_id].detach().cpu()
+            obj_quat_w = self.object_quat_w[env_id].detach().cpu()
+            yaw_obj_w = _yaw_from_quat(obj_quat_w)
+
+            robot_pos_w = self.robot_root_pos_w[env_id].detach().cpu()
+            robot_quat_w = self.robot_root_quat_w[env_id].detach().cpu()
+            yaw_robot = _yaw_from_quat(robot_quat_w)
+            yaw_obj_b = ((yaw_obj_w - yaw_robot + math.pi) % (2 * math.pi)) - math.pi
+
+            contact_w = self.contact_target_pos_w[env_id].detach().cpu()
+            contact_b = quat_apply_inverse(robot_quat_w.unsqueeze(0), contact_w - robot_pos_w).detach().cpu()
+            obj_pos_b = quat_apply_inverse(robot_quat_w.unsqueeze(0), (obj_pos_w - robot_pos_w).unsqueeze(0))[0].detach().cpu()
+
+            contact_uv = None
+            contact_pts_reproj_w = None
+            sensor = self.env.scene.sensors.get("tiled_camera", None)
+            if sensor is not None:
+                # Project contact targets into camera image and back-project using depth.
+                # Derive camera pose from head link + known offset (mirrors PerceptualSimpleEnv camera mount).
+                cam_pos_w = None
+                cam_quat_w = None
+                if self.head_body_idx is not None:
+                    head_pos_w = self.asset.data.body_link_pos_w[env_id, self.head_body_idx].detach().cpu()
+                    head_quat_w = self.asset.data.body_link_quat_w[env_id, self.head_body_idx].detach().cpu()
+                    # offset matches PerceptualSimpleEnv._camera_offset
+                    cam_off_pos = torch.tensor([0.18, 0.0, 0.08])
+                    cam_off_quat = torch.tensor([0.5, -0.5, 0.5, -0.5])
+                    cam_pos_w = head_pos_w + quat_apply(head_quat_w.unsqueeze(0), cam_off_pos).squeeze(0)
+                    cam_quat_w = quat_mul(head_quat_w, cam_off_quat)
+
+                K = None
+                if hasattr(sensor.data, "intrinsic_matrices"):
+                    K = sensor.data.intrinsic_matrices[env_id].detach().cpu().numpy()
+                elif hasattr(sensor.data, "intrinsic_matrix"):
+                    K = sensor.data.intrinsic_matrix[env_id].detach().cpu().numpy()
+                else:
+                    # Fallback: build intrinsics from camera cfg (pinhole model).
+                    H, W = sensor.image_shape
+                    focal_length = 7.6
+                    horizontal_aperture = 20.0
+                    fx = fy = focal_length * (W / horizontal_aperture)
+                    cx = W / 2.0
+                    cy = H / 2.0
+                    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+                if (K is not None) and (cam_pos_w is not None):
+                    # Transform contact points to camera frame.
+                    contact_cam = quat_rotate_inverse(cam_quat_w.unsqueeze(0), contact_w - cam_pos_w)
+                    contact_cam_np = contact_cam.numpy()
+                    zs = contact_cam_np[:, 2:3] + 1e-8
+                    # Forward project to pixels.
+                    uv = (K[:2, :2] @ contact_cam_np[:, :2].T / zs.T).T + K[:2, 2]
+                    contact_uv = uv.tolist()
+
+                    # Back-project using depth image to verify projection round-trip.
+                    depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
+                    uv_int = np.round(uv).astype(int)
+                    u = np.clip(uv_int[:, 0], 0, depth.shape[1]-1)
+                    v = np.clip(uv_int[:, 1], 0, depth.shape[0]-1)
+                    sampled_depth = depth[v, u][:, None]
+                    # camera frame coords
+                    fx, fy = K[0, 0], K[1, 1]
+                    cx, cy = K[0, 2], K[1, 2]
+                    x_cam = (uv[:, 0:1] - cx) * sampled_depth / fx
+                    y_cam = (uv[:, 1:2] - cy) * sampled_depth / fy
+                    z_cam = sampled_depth
+                    pts_cam = np.concatenate([x_cam, y_cam, z_cam], axis=1)
+                    # to world
+                    pts_cam_t = torch.from_numpy(pts_cam).float()
+                    pts_w = quat_apply(cam_quat_w.unsqueeze(0), pts_cam_t) + cam_pos_w
+                    contact_pts_reproj_w = pts_w.tolist()
+
+            info = {
+                "step": int(ts),
+                "env_id": env_id,
+                "object_world": {"pos": obj_pos_w.tolist(), "heading": yaw_obj_w},
+                "object_robot": {"pos": obj_pos_b.tolist(), "heading": yaw_obj_b},
+                "contact_target_world": contact_w.tolist(),
+                "contact_target_robot": contact_b.tolist(),
+                "contact_target_uv": contact_uv,
+                "contact_target_world_reproj": contact_pts_reproj_w,
+            }
+            json_path = os.path.join(step_dir, "info.json")
+            with open(json_path, "w") as f:
+                json.dump(info, f, indent=2)
+
+            if sensor is not None:
+                rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
+                depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
+
+                # if contact_uv is not None:
+                #     for u, v in contact_uv:
+                #         u_i = int(round(u))
+                #         v_i = int(round(v))
+                #         if 0 <= v_i < rgb.shape[0] and 0 <= u_i < rgb.shape[1]:
+                #             rr = 3
+                #             rgb[max(0, v_i - rr):min(rgb.shape[0], v_i + rr + 1),
+                #                 max(0, u_i - rr):min(rgb.shape[1], u_i + rr + 1)] = [255, 0, 0]
+
+                imageio.imwrite(os.path.join(step_dir, "rgb.png"), rgb.astype("uint8"))
+                depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
+                imageio.imwrite(os.path.join(step_dir, "depth.png"), depth_mm)
 
     def _init_debug_draw(self):
         super()._init_debug_draw()
@@ -597,14 +728,14 @@ class RobotObjectTracking(RobotTracking):
                 "left": sim_utils.SphereCfg(
                     radius=0.03,
                     visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(0.0, 1.0, 0.3),
+                        diffuse_color=(1.0, 0.0, 0.0),
                         metallic=1.0,
                     )
                 ),
                 "right": sim_utils.SphereCfg(
                     radius=0.03,
                     visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(0.0, 0.3, 1.0),
+                        diffuse_color=(1.0, 0.0, 0.0),
                         metallic=1.0,
                     )
                 ),
@@ -613,6 +744,30 @@ class RobotObjectTracking(RobotTracking):
         self.eef_contact_markers = VisualizationMarkers(vis_markers_cfg)
         self.eef_contact_markers_indices = [0, 1] * (self.num_envs * self.num_eefs)
         self.eef_contact_markers_pos_w = torch.zeros(self.num_envs, 2, self.num_eefs, 3)
+
+        # Markers for contact target positions (visible to cameras)
+        target_markers_cfg = VisualizationMarkersCfg(
+            prim_path=f"/World/ContactTargets",
+            markers={
+                "target_left": sim_utils.SphereCfg(
+                    radius=0.02,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.0, 0.0),
+                        metallic=0.0,
+                    )
+                ),
+                "target_right": sim_utils.SphereCfg(
+                    radius=0.02,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.0, 0.0),
+                        metallic=0.0,
+                    )
+                ),
+            }
+        )
+        self.contact_target_markers = VisualizationMarkers(target_markers_cfg)
+        self.contact_target_markers_indices = [i % self.num_eefs for i in range(self.num_envs * self.num_eefs)]
+        self.contact_target_markers_pos_w = torch.zeros(self.num_envs, self.num_eefs, 3)
 
     def debug_draw(self):
         super().debug_draw()
@@ -625,24 +780,37 @@ class RobotObjectTracking(RobotTracking):
         out_of_range_mask = ~self.ref_object_contact[:, None, :, None].expand_as(self.eef_contact_markers_pos_w)
         self.eef_contact_markers_pos_w[out_of_range_mask] = -1000.0
         
-        self.eef_contact_markers.visualize(
-            translations=self.eef_contact_markers_pos_w.view(-1, 3),
-            marker_indices=self.eef_contact_markers_indices,
+        # self.eef_contact_markers.visualize(
+        #     translations=self.eef_contact_markers_pos_w.view(-1, 3),
+        #     marker_indices=self.eef_contact_markers_indices,
+        # )
+
+        # update and visualize contact target markers so cameras can see them
+        self.contact_target_markers_pos_w[:] = self.contact_target_pos_w
+        self.contact_target_markers.visualize(
+            translations=self.contact_target_markers_pos_w.view(-1, 3),
+            marker_indices=self.contact_target_markers_indices,
         )
 
-        # visualize contact forces
-        self.env.debug_draw.vector(
-            self.contact_eef_pos_w.reshape(-1, 3),
-            self.eef_contact_forces_w.reshape(-1, 3) / 80,
-            color=(1.0, 1.0, 1.0, 1.0),
-            size=4.0,
-        )
+        # # visualize contact forces
+        # self.env.debug_draw.vector(
+        #     self.contact_eef_pos_w.reshape(-1, 3),
+        #     self.eef_contact_forces_w.reshape(-1, 3) / 80,
+        #     color=(1.0, 1.0, 1.0, 1.0),
+        #     size=4.0,
+        # )
 
-        # draw vector from robot root to contact target
+        # # draw vector from eef to contact target
+        # self.env.debug_draw.vector(
+        #     self.contact_eef_pos_w.view(-1, 3),
+        #     (self.contact_target_pos_w - self.contact_eef_pos_w).view(-1, 3),
+        #     color=(0, 1, 0, 1),
+        #     size=4.0,
+        # )
 
-        self.env.debug_draw.vector(
-            self.contact_eef_pos_w.view(-1, 3),
-            (self.contact_target_pos_w - self.contact_eef_pos_w).view(-1, 3),
-            color=(0, 1, 0, 1),
-            size=4.0,
-        )
+        # draw contact target points on the object as small red dots
+        # self.env.debug_draw.point(
+        #     self.contact_target_pos_w.view(-1, 3),
+        #     color=(1.0, 0.0, 0.0, 1.0),
+        #     size=8.0,
+        # )
