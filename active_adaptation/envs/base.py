@@ -6,6 +6,7 @@ import torch
 import hydra
 import numpy as np
 
+from PIL import Image
 from tensordict.tensordict import TensorDictBase, TensorDict
 from torchrl.envs import EnvBase
 from torchrl.data import (

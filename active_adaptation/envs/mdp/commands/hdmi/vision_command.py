@@ -39,6 +39,7 @@ class RobotObjectVisionTracking(RobotObjectTracking):
             vision_weight: Weight for vision position when blending (0=ground truth, 1=vision only)
             **kwargs: Arguments passed to RobotObjectTracking
         """
+        super().__init__(**kwargs)
 
         self.use_vision_tracking = use_vision_tracking
         self.vision_observation_name = vision_observation_name
@@ -48,8 +49,6 @@ class RobotObjectVisionTracking(RobotObjectTracking):
 
         # Vision tracker reference (will be set during environment initialization)
         self.vision_tracker = None
-
-        super().__init__(**kwargs)
 
         # Vision-based object state
         with torch.device(self.device):
