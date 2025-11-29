@@ -324,6 +324,7 @@ class RobotTracking(Command):
         self.all_marker_pos_w = torch.zeros(2, self.num_envs, self.num_tracking_bodies, 3, device=self.device)
 
     def debug_draw(self):
+        return
         if self.env.backend != "isaac":
             return
 
@@ -700,14 +701,14 @@ class RobotObjectTracking(RobotTracking):
                 rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
                 depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
 
-                if contact_uv is not None:
-                    for u, v in contact_uv:
-                        u_i = int(round(u))
-                        v_i = int(round(v))
-                        if 0 <= v_i < rgb.shape[0] and 0 <= u_i < rgb.shape[1]:
-                            rr = 3
-                            rgb[max(0, v_i - rr):min(rgb.shape[0], v_i + rr + 1),
-                                max(0, u_i - rr):min(rgb.shape[1], u_i + rr + 1)] = [255, 0, 0]
+                # if contact_uv is not None:
+                #     for u, v in contact_uv:
+                #         u_i = int(round(u))
+                #         v_i = int(round(v))
+                #         if 0 <= v_i < rgb.shape[0] and 0 <= u_i < rgb.shape[1]:
+                #             rr = 3
+                #             rgb[max(0, v_i - rr):min(rgb.shape[0], v_i + rr + 1),
+                #                 max(0, u_i - rr):min(rgb.shape[1], u_i + rr + 1)] = [255, 0, 0]
 
                 imageio.imwrite(os.path.join(step_dir, "rgb.png"), rgb.astype("uint8"))
                 depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
@@ -727,14 +728,14 @@ class RobotObjectTracking(RobotTracking):
                 "left": sim_utils.SphereCfg(
                     radius=0.03,
                     visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(0.0, 1.0, 0.3),
+                        diffuse_color=(1.0, 0.0, 0.0),
                         metallic=1.0,
                     )
                 ),
                 "right": sim_utils.SphereCfg(
                     radius=0.03,
                     visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(0.0, 0.3, 1.0),
+                        diffuse_color=(1.0, 0.0, 0.0),
                         metallic=1.0,
                     )
                 ),
@@ -743,6 +744,30 @@ class RobotObjectTracking(RobotTracking):
         self.eef_contact_markers = VisualizationMarkers(vis_markers_cfg)
         self.eef_contact_markers_indices = [0, 1] * (self.num_envs * self.num_eefs)
         self.eef_contact_markers_pos_w = torch.zeros(self.num_envs, 2, self.num_eefs, 3)
+
+        # Markers for contact target positions (visible to cameras)
+        target_markers_cfg = VisualizationMarkersCfg(
+            prim_path=f"/World/ContactTargets",
+            markers={
+                "target_left": sim_utils.SphereCfg(
+                    radius=0.02,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.0, 0.0),
+                        metallic=0.0,
+                    )
+                ),
+                "target_right": sim_utils.SphereCfg(
+                    radius=0.02,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.0, 0.0),
+                        metallic=0.0,
+                    )
+                ),
+            }
+        )
+        self.contact_target_markers = VisualizationMarkers(target_markers_cfg)
+        self.contact_target_markers_indices = [i % self.num_eefs for i in range(self.num_envs * self.num_eefs)]
+        self.contact_target_markers_pos_w = torch.zeros(self.num_envs, self.num_eefs, 3)
 
     def debug_draw(self):
         super().debug_draw()
@@ -760,19 +785,32 @@ class RobotObjectTracking(RobotTracking):
             marker_indices=self.eef_contact_markers_indices,
         )
 
-        # visualize contact forces
-        self.env.debug_draw.vector(
-            self.contact_eef_pos_w.reshape(-1, 3),
-            self.eef_contact_forces_w.reshape(-1, 3) / 80,
-            color=(1.0, 1.0, 1.0, 1.0),
-            size=4.0,
+        # update and visualize contact target markers so cameras can see them
+        self.contact_target_markers_pos_w[:] = self.contact_target_pos_w
+        self.contact_target_markers.visualize(
+            translations=self.contact_target_markers_pos_w.view(-1, 3),
+            marker_indices=self.contact_target_markers_indices,
         )
 
-        # draw vector from robot root to contact target
+        # # visualize contact forces
+        # self.env.debug_draw.vector(
+        #     self.contact_eef_pos_w.reshape(-1, 3),
+        #     self.eef_contact_forces_w.reshape(-1, 3) / 80,
+        #     color=(1.0, 1.0, 1.0, 1.0),
+        #     size=4.0,
+        # )
 
-        self.env.debug_draw.vector(
-            self.contact_eef_pos_w.view(-1, 3),
-            (self.contact_target_pos_w - self.contact_eef_pos_w).view(-1, 3),
-            color=(0, 1, 0, 1),
-            size=4.0,
-        )
+        # # draw vector from eef to contact target
+        # self.env.debug_draw.vector(
+        #     self.contact_eef_pos_w.view(-1, 3),
+        #     (self.contact_target_pos_w - self.contact_eef_pos_w).view(-1, 3),
+        #     color=(0, 1, 0, 1),
+        #     size=4.0,
+        # )
+
+        # draw contact target points on the object as small red dots
+        # self.env.debug_draw.point(
+        #     self.contact_target_pos_w.view(-1, 3),
+        #     color=(1.0, 0.0, 0.0, 1.0),
+        #     size=8.0,
+        # )
