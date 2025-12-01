@@ -699,18 +699,21 @@ class RobotObjectTracking(RobotTracking):
 
             if sensor is not None:
                 rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
-                depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
-
-                # if contact_uv is not None:
-                #     for u, v in contact_uv:
-                #         u_i = int(round(u))
-                #         v_i = int(round(v))
-                #         if 0 <= v_i < rgb.shape[0] and 0 <= u_i < rgb.shape[1]:
-                #             rr = 3
-                #             rgb[max(0, v_i - rr):min(rgb.shape[0], v_i + rr + 1),
-                #                 max(0, u_i - rr):min(rgb.shape[1], u_i + rr + 1)] = [255, 0, 0]
-
-                imageio.imwrite(os.path.join(step_dir, "rgb.png"), rgb.astype("uint8"))
+                # TODO: change H, W to read by camera
+                H, W = float(rgb.shape[0]), float(rgb.shape[1])
+                tracked_points, visibility = None, None
+                if ((5 < uv) & (uv < np.array([W, H]))).all() and (ts > 0):
+                    cotracker_input = sensor.data.output["rgb"][env_id].permute(2, 0, 1).unsqueeze(0)
+                    if not self.tracker_initialized[env_id]:
+                        uv_tensor = torch.from_numpy(uv[None]).float().to(self.device)
+                        env_ids = [env_id]
+                        # save the uv_tensor and cotracker_input for debugging
+                        self.tracker.reset(env_ids, cotracker_input, uv_tensor)
+                        self.tracker_initialized[env_id] = True
+                    tracked_points, visibility = self.tracker.update(cotracker_input)
+                    current_point, current_visibility = tracked_points[env_id, -1], tracked_points[env_id, -1]
+                if tracked_points is not None:
+                    print('Tracked points:', current_point, uv)
                 depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
                 imageio.imwrite(os.path.join(step_dir, "depth.png"), depth_mm)
 
