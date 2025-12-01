@@ -460,6 +460,9 @@ class RobotObjectTracking(RobotTracking):
         #     # expand to num_eefs
         #     self._object_contact = self._object_contact.repeat(1, self.num_eefs)
         # # shape: [num_steps, num_eefs/1]
+        from cotracker_wrapper import CoTrackerWrapper
+        self.tracker = CoTrackerWrapper(num_envs=1, device=self.device, max_points=2)
+        self.tracker_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self._init_debug_draw()
         self.update()
@@ -603,10 +606,27 @@ class RobotObjectTracking(RobotTracking):
             # log RGB-D and object/contact info for env 0
             env_id = 0
             log_root = os.path.join(os.getcwd(), "inf_log")
+            inv_log_root = os.path.join(os.getcwd(), "inv_log_to3d")
             os.makedirs(log_root, exist_ok=True)
+            os.makedirs(inv_log_root, exist_ok=True)
+            inv_dirs = {
+                "rgb": os.path.join(inv_log_root, "rgb"),
+                "depth": os.path.join(inv_log_root, "depth"),
+                "depth_info": os.path.join(inv_log_root, "depth_info"),
+                "extrinsic": os.path.join(inv_log_root, "extrinsic"),
+                "tracking_3d": os.path.join(inv_log_root, "tracking_3d"),
+            }
+            for path in inv_dirs.values():
+                os.makedirs(path, exist_ok=True)
+
             ts = getattr(self.env, "timestamp", 0)
-            step_dir = os.path.join(log_root, f"step_{int(ts):06d}")
-            os.makedirs(step_dir, exist_ok=True)
+            frame_id = f"{int(ts):06d}"
+            inv_paths = {
+                "rgb": os.path.join(inv_dirs["rgb"], f"rgb_{frame_id}.png"),
+                "depth_png": os.path.join(inv_dirs["depth"], f"depth_{frame_id}.png"),
+                "depth_npy": os.path.join(inv_dirs["depth_info"], f"depth_{frame_id}.npy"),
+                "extrinsic": os.path.join(inv_dirs["extrinsic"], f"extrinsic_{frame_id}.npy"),
+            }
 
             def _yaw_from_quat(q: torch.Tensor):
                 qw, qx, qy, qz = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
@@ -657,6 +677,25 @@ class RobotObjectTracking(RobotTracking):
                     cy = H / 2.0
                     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
                 if (K is not None) and (cam_pos_w is not None):
+                    depth_img = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
+                    fx, fy = K[0, 0], K[1, 1]
+                    cx, cy = K[0, 2], K[1, 2]
+
+                    # def _backproject_pixels(uv_array: Optional[np.ndarray]):
+                    #     if uv_array is None or uv_array.size == 0:
+                    #         return None
+                    #     uv_int = np.round(uv_array).astype(int)
+                    #     u_idx = np.clip(uv_int[:, 0], 0, depth_img.shape[1] - 1)
+                    #     v_idx = np.clip(uv_int[:, 1], 0, depth_img.shape[0] - 1)
+                    #     sampled_depth = depth_img[v_idx, u_idx][:, None]
+                    #     x_cam = (uv_array[:, 0:1] - cx) * sampled_depth / fx
+                    #     y_cam = (uv_array[:, 1:2] - cy) * sampled_depth / fy
+                    #     z_cam = sampled_depth
+                    #     pts_cam = np.concatenate([x_cam, y_cam, z_cam], axis=1)
+                    #     pts_cam_t = torch.from_numpy(pts_cam).float()
+                    #     pts_w = quat_apply(cam_quat_w.unsqueeze(0), pts_cam_t) + cam_pos_w
+                    #     return pts_w.tolist()
+
                     # Transform contact points to camera frame.
                     contact_cam = quat_rotate_inverse(cam_quat_w.unsqueeze(0), contact_w - cam_pos_w)
                     contact_cam_np = contact_cam.numpy()
@@ -693,10 +732,6 @@ class RobotObjectTracking(RobotTracking):
                 "contact_target_uv": contact_uv,
                 "contact_target_world_reproj": contact_pts_reproj_w,
             }
-            json_path = os.path.join(step_dir, "info.json")
-            with open(json_path, "w") as f:
-                json.dump(info, f, indent=2)
-
             if sensor is not None:
                 rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
                 # TODO: change H, W to read by camera
@@ -711,11 +746,114 @@ class RobotObjectTracking(RobotTracking):
                         self.tracker.reset(env_ids, cotracker_input, uv_tensor)
                         self.tracker_initialized[env_id] = True
                     tracked_points, visibility = self.tracker.update(cotracker_input)
-                    current_point, current_visibility = tracked_points[env_id, -1], tracked_points[env_id, -1]
+                    current_points, current_visibility = tracked_points[env_id, -1], visibility[env_id, -1]
                 if tracked_points is not None:
-                    print('Tracked points:', current_point, uv)
+                    print('Tracked points:', current_points, uv)
+                
+                def two_d_to_three_d(
+                    uv: torch.Tensor,
+                    depth: torch.Tensor,
+                    K: torch.Tensor,
+                    cam_quat_w: torch.Tensor,
+                    cam_pos_w: torch.Tensor,
+                ) -> torch.Tensor:
+                    # uv: (N, 2) in pixel coordinates
+                    # depth: (H, W)
+                    # K: (3, 3)
+                    # cam_quat_w: (4,) world rotation of camera (w, x, y, z)
+                    # cam_pos_w: (3,) world position of camera
+
+                    device = uv.device
+                    depth = depth.to(device)
+                    K = K.to(device)
+                    cam_quat_w = cam_quat_w.to(device)
+                    cam_pos_w = cam_pos_w.to(device)
+
+                    fx, fy = K[0, 0], K[1, 1]
+                    cx, cy = K[0, 2], K[1, 2]
+
+                    H, W = depth.shape[-2], depth.shape[-1]
+                    N = uv.shape[0]
+
+                    u = torch.clamp(torch.round(uv[:, 0]).long(), 0, W - 1)
+                    v = torch.clamp(torch.round(uv[:, 1]).long(), 0, H - 1)
+
+                    d = depth[v, u]  # (N,)
+
+                    x_cam = (uv[:, 0] - cx) * d / fx
+                    y_cam = (uv[:, 1] - cy) * d / fy
+                    z_cam = d
+
+                    cam_pt = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (N, 3)
+
+                    if cam_quat_w.dim() == 1:
+                        cam_quat_w = cam_quat_w.unsqueeze(0).expand(N, -1)  # (N, 4)
+                    if cam_pos_w.dim() == 1:
+                        cam_pos_w = cam_pos_w.unsqueeze(0).expand(N, -1)    # (N, 3)
+
+                    world_pt = quat_apply(cam_quat_w, cam_pt) + cam_pos_w   # (N, 3)
+                    return world_pt
+
                 depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
-                imageio.imwrite(os.path.join(step_dir, "depth.png"), depth_mm)
+                depth_float32 = depth.astype(np.float32)
+
+                # Perform 2D to 3D conversion only if tracked_points is available
+                if tracked_points is not None:
+                    # Convert depth to tensor
+                    depth_tensor = torch.from_numpy(depth_float32)
+                    # Get intrinsic matrix as tensor
+                    K_tensor = sensor.data.intrinsic_matrices[env_id]
+                    # current_points has shape (N, 2) for N contact points
+                    # Ensure it's 2D even for single point
+                    if current_points.ndim == 1:
+                        uv_2d = current_points.unsqueeze(0)  # (1, 2)
+                    else:
+                        uv_2d = current_points  # (N, 2)
+
+                    world_pts = two_d_to_three_d(uv_2d, depth_tensor, K_tensor, cam_quat_w, cam_pos_w)
+                    # GT points: match the number of tracked points
+                    num_tracked = world_pts.shape[0]
+                    gt_pts = contact_w[0:num_tracked, :]  # shape: (N, 3)
+                    print('Reconstructed 3D points:', world_pts.cpu().numpy().tolist())
+                    print('Ground truth 3D points:', gt_pts.cpu().numpy().tolist())
+                    print(gt_pts.shape, world_pts.shape)
+                    # Save 3D tracking data for visualization
+                    tracking_3d_path = os.path.join(inv_dirs["tracking_3d"], f"tracking_{frame_id}.npz")
+                    np.savez(
+                        tracking_3d_path,
+                        reconstructed_3d=world_pts.cpu().numpy(),  # (N, 3)
+                        gt_3d=gt_pts.cpu().numpy(),  # (N, 3)
+                        uv_2d=uv_2d.cpu().numpy(),  # (N, 2)
+                        timestamp=ts,
+                        num_points=num_tracked
+                    )
+
+                # Mirror data to inverse logging directory (fat structure).
+                # imageio.imwrite(inv_paths["rgb"], rgb_uint8)
+                # imageio.imwrite(inv_paths["depth_png"], depth_mm)
+                # np.save(inv_paths["depth_npy"], depth_float32)
+
+                depth_valid = depth_float32[np.isfinite(depth_float32)]
+
+                extr_matrix = None
+                if (cam_pos_w is not None) and (cam_quat_w is not None):
+                    cam_pos_np = cam_pos_w.detach().cpu().numpy().astype(np.float32)
+                    cam_quat_np = cam_quat_w.detach().cpu().numpy().astype(np.float32)
+                    qw, qx, qy, qz = cam_quat_np
+                    rot_matrix = np.array(
+                        [
+                            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+                        ],
+                        dtype=np.float32,
+                    )
+                    extr_matrix = np.eye(4, dtype=np.float32)
+                    extr_matrix[:3, :3] = rot_matrix
+                    extr_matrix[:3, 3] = cam_pos_np
+                    np.save(inv_paths["extrinsic"], extr_matrix)
+
+
 
     def _init_debug_draw(self):
         super()._init_debug_draw()
@@ -723,8 +861,8 @@ class RobotObjectTracking(RobotTracking):
         if self.env.backend != "isaac":
             return
         
-        from isaaclab.markers import VisualizationMarkersCfg, VisualizationMarkers
         import isaaclab.sim as sim_utils
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
         vis_markers_cfg = VisualizationMarkersCfg(
             prim_path=f"/World/EefContact",
             markers={
