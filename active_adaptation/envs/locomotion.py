@@ -17,8 +17,8 @@ from isaaclab.envs import ViewerCfg
     
 
 class SimpleEnv(_Env):
-    def __init__(self, cfg):
-        super().__init__(cfg)
+    def __init__(self, cfg, enable_debug_draw: bool=True):        
+        super().__init__(cfg, enable_debug_draw=enable_debug_draw)
         self.robot = self.scene.articulations["robot"]
         
         if self.sim.has_gui():
@@ -155,12 +155,15 @@ class SimpleEnv(_Env):
         except ModuleNotFoundError as e:
             print("Set app.enable_cameras=true to use cameras.")
         
-        try:
-            from active_adaptation.utils.debug import DebugDraw
-            self.debug_draw = DebugDraw()
-            print("[INFO] Debug Draw API enabled.")
-        except ModuleNotFoundError:
-            print()
+        if self.enable_debug_draw:
+            try:
+                from active_adaptation.utils.debug import DebugDraw
+                self.debug_draw = DebugDraw()
+                print("[INFO] Debug Draw API enabled.")
+            except ModuleNotFoundError:
+                print()
+        else:
+            print("[INFO] Debug Draw API disabled.")
         
         asset_meta = get_asset_meta(self.scene["robot"])
         path = os.path.join(os.getcwd(), "asset_meta.json")
@@ -187,9 +190,9 @@ class SimpleEnv(_Env):
 class PerceptualSimpleEnv(SimpleEnv):
     """SimpleEnv variant that always mounts a tiled RGB-D camera on the humanoid head."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, enable_debug_draw: bool=True):
         cfg.enable_cameras = True
-        super().__init__(cfg)
+        super().__init__(cfg, enable_debug_draw=enable_debug_draw)
     
     @property
     def need_render(self) -> bool: return True
@@ -217,6 +220,12 @@ class PerceptualSimpleEnv(SimpleEnv):
             horizontal_aperture=20.0,
             clipping_range=(0.1, 1.0e5),
         )
+        # camera_spawn_cfg = sim_utils.PinholeCameraCfg(
+        #     focal_length=7.6,
+        #     focus_distance=1_000.0,
+        #     horizontal_aperture=10.5,
+        #     clipping_range=(0.1, 1.0e5),
+        # )
 
         pos_offset_l, rot_offset_l = self._camera_offset_left()
         left_camera_cfg = TiledCameraCfg(

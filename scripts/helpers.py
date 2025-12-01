@@ -108,7 +108,7 @@ class EpisodeStats:
         return self._episodes.item()
 
 
-def make_env_policy(cfg: DictConfig):
+def make_env_policy(cfg: DictConfig, enable_debug_draw: bool = True):
     OmegaConf.set_struct(cfg, False)
     from active_adaptation.envs import PerceptualSimpleEnv, SimpleEnv
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, VecNorm, StepCounter
@@ -125,9 +125,9 @@ def make_env_policy(cfg: DictConfig):
 
     # If you don't need camera you can use SimpleEnv instead.
     if not cfg.task.get("enable_cameras", False):
-        base_env = SimpleEnv(cfg.task)
+        base_env = SimpleEnv(cfg.task, enable_debug_draw=enable_debug_draw)
     else:
-        base_env = PerceptualSimpleEnv(cfg.task)
+        base_env = PerceptualSimpleEnv(cfg.task, enable_debug_draw=enable_debug_draw)
 
     checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
     if checkpoint_path is not None:

@@ -93,9 +93,10 @@ class _Env(EnvBase):
     - no longer recompute observation upon reset
 
     """
-    def __init__(self, cfg):
+    def __init__(self, cfg, enable_debug_draw: bool=True):
         self.cfg = cfg
         self.backend = active_adaptation.get_backend()
+        self.enable_debug_draw = enable_debug_draw
 
         self.scene: InteractiveScene
         self.setup_scene()
@@ -459,7 +460,7 @@ class _Env(EnvBase):
         tensordict.set("discount", self.discount.clone())
         tensordict["stats"] = self.stats.clone()
 
-        if self.sim.has_gui():
+        if self.sim.has_gui() and self.enable_debug_draw:
             if hasattr(self, "debug_draw"): # isaac only
                 self.debug_draw.clear()
             for callback in self._debug_draw_callbacks:

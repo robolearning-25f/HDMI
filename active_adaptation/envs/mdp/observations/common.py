@@ -1,17 +1,22 @@
 import torch
+import uuid
+import cv2
 import rerun as rr
 import pypose as pp
+import numpy as np
+from dataclasses import dataclass
+from pathlib import Path
 from active_adaptation.envs.mdp.base import Observation
 import active_adaptation.utils.symmetry as sym_utils
 
 from isaaclab.utils.math import quat_apply_inverse
 from isaaclab.sensors import TiledCamera
-from typing import TYPE_CHECKING, Tuple, List
+from typing import Tuple, List
 from isaaclab.assets import Articulation
 from isaaclab.sensors import ContactSensor
 
 
-def get_camera_pose_from_link(robot: Articulation, env_id: int, offset_pos_LC: torch.Tensor, link_name: str):
+def get_camera_pose_from_link(robot: Articulation, env_id: int, offset_pos_LC: torch.Tensor, link_name: str) -> pp.LieTensor:
     # 1) Get link index and world pose of that link
     link_idx = robot.find_bodies(link_name)[0][0]
 
@@ -33,7 +38,6 @@ def get_camera_pose_from_link(robot: Articulation, env_id: int, offset_pos_LC: t
     T_world_link = pp.SE3(torch.cat([link_pos_w, link_quat_xyzw], dim=0))
 
     return T_world_link @ T_link_cam
-
 
 def random_noise(x: torch.Tensor, std: float):
     return x + torch.randn_like(x).clamp(-3., 3.) * std
@@ -365,20 +369,83 @@ class depth_camera(Observation):
         return depth_img.unsqueeze(1) # [N, 1, H, W]
 
 class stereo_camera(Observation):
-    def __init__(self, env, camera_l: str, camera_r: str):
+    
+    @dataclass
+    class save_state:
+        root     : Path
+        poses    : list[pp.LieTensor]
+        intrinsic: list[torch.Tensor]
+        frame: int = 0
+
+        @classmethod
+        def get(cls, save_root: str):
+            save_target = Path(save_root, cls._get_uid())
+            Path(save_target).mkdir(parents=True)
+            Path(save_target, "left").mkdir()
+            Path(save_target, "right").mkdir()
+            return cls(save_target, poses=[], intrinsic=[])
+
+        def finalize(self):
+            all_intrinsics = torch.stack(self.intrinsic, dim=0).cpu().numpy()
+            np.save(Path(self.root, "intrinsic.npy"), all_intrinsics)
+            
+            all_poses      = torch.stack(list(map(pp.tensor, self.poses)), dim=0).cpu().numpy()
+            np.save(Path(self.root, "poses.npy"), all_poses)
+
+        def save_image(self, robot: Articulation, K: torch.Tensor, left_image: torch.Tensor, right_image: torch.Tensor):
+            # left_image : fp32, shape=(3, H, W)
+            # right_image: fp32, shape=(3, H, W)
+            left_save_target  = Path(self.root, "left" , f"{self.frame:05d}.png")
+            right_save_target = Path(self.root, "right", f"{self.frame:05d}.png")
+            
+            def to_bgr_uint8(img):
+                # img: (3, H, W) float32 torch tensor
+                img = img.detach().cpu().numpy()
+                img = np.moveaxis(img, 0, 2)                # (H, W, 3)
+                img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) # OpenCV expects BGR
+                return img
+
+            left_img  = to_bgr_uint8(left_image)
+            right_img = to_bgr_uint8(right_image)
+            print(f">>> {left_save_target}")
+            cv2.imwrite(str(left_save_target) , left_img )
+            cv2.imwrite(str(right_save_target), right_img)
+            
+            self.poses.append(get_camera_pose_from_link(robot, 0, torch.tensor((0.18, -0.05, 0.08)), "d435_link"))
+            self.intrinsic.append(K)
+            self.frame += 1
+        
+        @staticmethod
+        def _get_uid() -> str:
+            return uuid.uuid4().hex[:8]
+    
+    def __init__(self, env, camera_l: str, camera_r: str, save_to: str | None = None):
         super().__init__(env)
         self.camera_l: TiledCamera = self.env.scene.sensors[camera_l]
         self.camera_r: TiledCamera = self.env.scene.sensors[camera_r]
         self.robot: Articulation = self.env.scene.articulations["robot"]
+        
+        self.root = save_to
+        if save_to is not None:
+            self.save = [self.save_state.get(save_to) for i in range(self.num_envs)]
+        else:
+            self.save = None
+
+    def reset(self, env_ids: torch.Tensor):
+        super().reset(env_ids)
+        if self.save is None: return
+        assert self.root is not None
+        
+        for env_id in env_ids.tolist():
+            env_id = int(env_id)
+            self.save[env_id].finalize()
+            self.save[env_id] = self.save_state.get(self.root)
 
     def _log_pinhole(self, camera: TiledCamera, rgb: torch.Tensor):
         height, width = rgb.shape[1], rgb.shape[2]
-        intrinsic = getattr(camera.data, "intrinsic_matrices", None)
-        if intrinsic is None and isinstance(getattr(camera.data, "output", None), dict):
-            intrinsic = camera.data.output.get("intrinsic_mtx") or camera.data.output.get("intrinsic_matrices")
-        assert intrinsic is not None
+        intrinsic = torch.as_tensor(camera.data.intrinsic_matrices)
         
-        intrinsic = torch.as_tensor(intrinsic)
         if intrinsic.ndim == 3:
             intrinsic = intrinsic[0]
         fx, fy = intrinsic[0, 0].item(), intrinsic[1, 1].item()
@@ -401,15 +468,21 @@ class stereo_camera(Observation):
 
         rr.log("/stereo/L/cam",
             rr.Image(rgb_l.cpu()[0].numpy()), self._log_pinhole(self.camera_l, rgb_l),
-            self._log_transform(torch.tensor((0.18, -0.05, 0.08)))
+            self._log_transform(offset=torch.tensor((0.18, -0.05, 0.08)))
         )
         
         rr.log("/stereo/R/cam",
             rr.Image(rgb_r.cpu()[0].numpy()), self._log_pinhole(self.camera_r, rgb_r),
-            self._log_transform(torch.tensor((0.18, 0.05, 0.08)))
+            self._log_transform(offset=torch.tensor((0.18, 0.05, 0.08)))
         )
 
         rgb_l_f32 = rgb_l.permute(0, 3, 1, 2).float() / 255.
         rgb_r_f32 = rgb_r.permute(0, 3, 1, 2).float() / 255.
-        # return channel-first: [N, 6, H, W]    
+        
+        if self.save is not None:
+            Ks = torch.as_tensor(self.camera_l.data.intrinsic_matrices)
+            for env_idx, (rgb_l_s, rgb_r_s, K) in enumerate(zip(rgb_l_f32.unbind(0), rgb_r_f32.unbind(0), Ks.unbind(0))):
+                self.save[env_idx].save_image(self.robot, K, rgb_l_s, rgb_r_s)
+        
+        # return channel-first: [N, 6, H, W]
         return torch.cat([rgb_l_f32, rgb_r_f32], dim=1)
