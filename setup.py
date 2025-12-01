@@ -17,6 +17,7 @@ setup(
         "termcolor",
         "setproctitle",
         "pygame", # for game controller
+        "pypose",
         "mujoco",
         "xxhash",
         "onnxscript==0.3.0",
