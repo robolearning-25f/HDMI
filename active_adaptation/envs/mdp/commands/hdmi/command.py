@@ -226,7 +226,51 @@ class RobotTracking(Command):
             json.dump(moton_meta, f, indent=4)
         print(f"Saved recorded motion to {motion_data_path} and {motion_meta_path}")
         breakpoint()
-            
+    
+    def two_d_to_three_d(
+        self,
+        uv: torch.Tensor,
+        depth: torch.Tensor,
+        K: torch.Tensor,
+        cam_quat_w: torch.Tensor,
+        cam_pos_w: torch.Tensor,
+    ) -> torch.Tensor:
+        # uv: (N, 2) in pixel coordinates
+        # depth: (H, W)
+        # K: (3, 3)
+        # cam_quat_w: (4,) world rotation of camera (w, x, y, z)
+        # cam_pos_w: (3,) world position of camera
+
+        device = uv.device
+        depth = depth.to(device)
+        K = K.to(device)
+        cam_quat_w = cam_quat_w.to(device)
+        cam_pos_w = cam_pos_w.to(device)
+
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+
+        H, W = depth.shape[-2], depth.shape[-1]
+        N = uv.shape[0]
+
+        u = torch.clamp(torch.round(uv[:, 0]).long(), 0, W - 1)
+        v = torch.clamp(torch.round(uv[:, 1]).long(), 0, H - 1)
+
+        d = depth[v, u]  # (N,)
+
+        x_cam = (uv[:, 0] - cx) * d / fx
+        y_cam = (uv[:, 1] - cy) * d / fy
+        z_cam = d
+
+        cam_pt = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (N, 3)
+
+        if cam_quat_w.dim() == 1:
+            cam_quat_w = cam_quat_w.unsqueeze(0).expand(N, -1)  # (N, 4)
+        if cam_pos_w.dim() == 1:
+            cam_pos_w = cam_pos_w.unsqueeze(0).expand(N, -1)    # (N, 3)
+
+        world_pt = quat_apply(cam_quat_w, cam_pt) + cam_pos_w   # (N, 3)
+        return world_pt
 
     @property
     def success(self):
@@ -369,9 +413,14 @@ class RobotObjectTracking(RobotTracking):
         contact_target_pos_offset: List[Tuple[float, float, float]] = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)],
         ## offset from end effector
         contact_eef_pos_offset: List[Tuple[float, float, float]] = [(0.1, 0.0, 0.0), (0.1, 0.0, 0.0)],
+        # vision-based tracking control
+        use_vision_for_tracking: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs, call_update=False)
+
+        # Store vision tracking flag
+        self.use_vision_for_tracking = use_vision_for_tracking
 
         self.extra_objects: List[Articulation | RigidObject] = [self.env.scene[name] for name in extra_object_names]
         self.extra_object_body_id_motion = [self.dataset.body_names.index(name) for name in extra_object_names]
@@ -460,6 +509,9 @@ class RobotObjectTracking(RobotTracking):
         #     # expand to num_eefs
         #     self._object_contact = self._object_contact.repeat(1, self.num_eefs)
         # # shape: [num_steps, num_eefs/1]
+        from cotracker_wrapper import CoTrackerWrapper
+        self.tracker = CoTrackerWrapper(num_envs=1, device=self.device, max_points=2)
+        self.tracker_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self._init_debug_draw()
         self.update()
@@ -603,10 +655,10 @@ class RobotObjectTracking(RobotTracking):
             # log RGB-D and object/contact info for env 0
             env_id = 0
             log_root = os.path.join(os.getcwd(), "inf_log")
+            inv_log_root = os.path.join(os.getcwd(), "inv_log_to3d")
             os.makedirs(log_root, exist_ok=True)
+            os.makedirs(inv_log_root, exist_ok=True)
             ts = getattr(self.env, "timestamp", 0)
-            step_dir = os.path.join(log_root, f"step_{int(ts):06d}")
-            os.makedirs(step_dir, exist_ok=True)
 
             def _yaw_from_quat(q: torch.Tensor):
                 qw, qx, qy, qz = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
@@ -657,6 +709,10 @@ class RobotObjectTracking(RobotTracking):
                     cy = H / 2.0
                     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
                 if (K is not None) and (cam_pos_w is not None):
+                    depth_img = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
+                    fx, fy = K[0, 0], K[1, 1]
+                    cx, cy = K[0, 2], K[1, 2]
+
                     # Transform contact points to camera frame.
                     contact_cam = quat_rotate_inverse(cam_quat_w.unsqueeze(0), contact_w - cam_pos_w)
                     contact_cam_np = contact_cam.numpy()
@@ -683,36 +739,67 @@ class RobotObjectTracking(RobotTracking):
                     pts_w = quat_apply(cam_quat_w.unsqueeze(0), pts_cam_t) + cam_pos_w
                     contact_pts_reproj_w = pts_w.tolist()
 
-            info = {
-                "step": int(ts),
-                "env_id": env_id,
-                "object_world": {"pos": obj_pos_w.tolist(), "heading": yaw_obj_w},
-                "object_robot": {"pos": obj_pos_b.tolist(), "heading": yaw_obj_b},
-                "contact_target_world": contact_w.tolist(),
-                "contact_target_robot": contact_b.tolist(),
-                "contact_target_uv": contact_uv,
-                "contact_target_world_reproj": contact_pts_reproj_w,
-            }
-            json_path = os.path.join(step_dir, "info.json")
-            with open(json_path, "w") as f:
-                json.dump(info, f, indent=2)
-
             if sensor is not None:
                 rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
-                depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
-
-                # if contact_uv is not None:
-                #     for u, v in contact_uv:
-                #         u_i = int(round(u))
-                #         v_i = int(round(v))
-                #         if 0 <= v_i < rgb.shape[0] and 0 <= u_i < rgb.shape[1]:
-                #             rr = 3
-                #             rgb[max(0, v_i - rr):min(rgb.shape[0], v_i + rr + 1),
-                #                 max(0, u_i - rr):min(rgb.shape[1], u_i + rr + 1)] = [255, 0, 0]
-
-                imageio.imwrite(os.path.join(step_dir, "rgb.png"), rgb.astype("uint8"))
+                # TODO: change H, W to read by camera
+                H, W = float(rgb.shape[0]), float(rgb.shape[1])
+                tracked_points, visibility = None, None
+                if ((5 < uv) & (uv < np.array([W, H]))).all() and (ts > 0):
+                    cotracker_input = sensor.data.output["rgb"][env_id].permute(2, 0, 1).unsqueeze(0)
+                    if not self.tracker_initialized[env_id]:
+                        uv_tensor = torch.from_numpy(uv[None]).float().to(self.device)
+                        env_ids = [env_id]
+                        # save the uv_tensor and cotracker_input for debugging
+                        self.tracker.reset(env_ids, cotracker_input, uv_tensor)
+                        self.tracker_initialized[env_id] = True
+                    tracked_points, visibility = self.tracker.update(cotracker_input)
+                    current_points, current_visibility = tracked_points[env_id, -1], visibility[env_id, -1]
+                if tracked_points is not None:
+                    print('Tracked points:', current_points, uv)
+                
                 depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
-                imageio.imwrite(os.path.join(step_dir, "depth.png"), depth_mm)
+                depth_float32 = depth.astype(np.float32)
+
+                # Robust fallback logic for vision-based tracking
+                # C = cotracker_3d_points, G = gt_3d_points
+                C = None  # CoTracker reconstructed 3D points
+                G = contact_w  # Ground truth 3D points
+
+                # Validate CoTracker tracking
+                cotracker_valid = False
+                if tracked_points is not None:
+                    try:
+                        depth_tensor = torch.from_numpy(depth_float32)
+                        K_tensor = sensor.data.intrinsic_matrices[env_id]
+
+                        # current_points has shape (N, 2) for N contact points
+                        if current_points.ndim == 1:
+                            uv_2d = current_points.unsqueeze(0)  # (1, 2)
+                        else:
+                            uv_2d = current_points  # (N, 2) 
+
+                        # Reconstruct 3D points from 2D tracking: uv2d is from cotracker!! 
+                        C = self.two_d_to_three_d(uv_2d, depth_tensor, K_tensor, cam_quat_w, cam_pos_w)
+
+                        # Validate: check if we got the expected number of points
+                        N_expected = self.num_eefs  # Expected number of contact points
+                        cotracker_valid = (C is not None) and (C.shape[0] == N_expected)
+                    except Exception as e:
+                        print(f"[Warning] CoTracker 3D reconstruction failed: {e}")
+                        cotracker_valid = False
+
+                # Ground truth validation
+                gt_valid = (G is not None) and (G.shape[0] >= self.num_eefs)
+
+                # Apply fallback logic
+                if self.use_vision_for_tracking:
+                    if not cotracker_valid or not gt_valid:
+                        # Fallback: keep previous target if vision/GT unavailable
+                        print(f"[Warning] Vision tracking unavailable (cotracker={cotracker_valid}, gt={gt_valid}), keeping previous target")
+                    else:
+                        # Normal case: replace GT with CoTracker result
+                        self.contact_target_pos_w[env_id] = C
+                        print(f"[Info] Using vision-based tracking for env {env_id}")
 
     def _init_debug_draw(self):
         super()._init_debug_draw()
@@ -720,8 +807,8 @@ class RobotObjectTracking(RobotTracking):
         if self.env.backend != "isaac":
             return
         
-        from isaaclab.markers import VisualizationMarkersCfg, VisualizationMarkers
         import isaaclab.sim as sim_utils
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
         vis_markers_cfg = VisualizationMarkersCfg(
             prim_path=f"/World/EefContact",
             markers={
@@ -780,10 +867,10 @@ class RobotObjectTracking(RobotTracking):
         out_of_range_mask = ~self.ref_object_contact[:, None, :, None].expand_as(self.eef_contact_markers_pos_w)
         self.eef_contact_markers_pos_w[out_of_range_mask] = -1000.0
         
-        self.eef_contact_markers.visualize(
-            translations=self.eef_contact_markers_pos_w.view(-1, 3),
-            marker_indices=self.eef_contact_markers_indices,
-        )
+        # self.eef_contact_markers.visualize(
+        #     translations=self.eef_contact_markers_pos_w.view(-1, 3),
+        #     marker_indices=self.eef_contact_markers_indices,
+        # )
 
         # update and visualize contact target markers so cameras can see them
         self.contact_target_markers_pos_w[:] = self.contact_target_pos_w

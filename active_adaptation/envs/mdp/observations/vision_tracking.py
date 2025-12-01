@@ -10,7 +10,10 @@ from typing import Optional, Tuple, List
 from isaaclab.utils.math import quat_rotate_inverse, matrix_from_quat
 
 from active_adaptation.envs.mdp.base import Observation
-from active_adaptation.envs.mdp.trackers.cotracker_wrapper import CoTrackerWrapper
+from active_adaptation.envs.mdp.trackers.cotracker_wrapper import (
+    CoTrackerWrapper,
+    TapTrackerWrapper,
+)
 
 
 class VisionTrackedObjectObservation(Observation):
@@ -28,6 +31,7 @@ class VisionTrackedObjectObservation(Observation):
         num_tracking_points: int = 16,
         grid_size: int = 4,
         use_cotracker: bool = True,
+        tracker_backend: Optional[str] = None,
         cotracker_checkpoint: Optional[str] = None,
         reinit_on_lost_tracking: bool = True,
         min_visible_points: int = 4,
@@ -43,7 +47,8 @@ class VisionTrackedObjectObservation(Observation):
             camera_name: Name of camera sensor in scene
             num_tracking_points: Number of points to track on object
             grid_size: Grid size for automatic point sampling (grid_size x grid_size points)
-            use_cotracker: Whether to use CoTracker (True) or simple tracking (False)
+            use_cotracker: Legacy flag for CoTracker vs. alt backends
+            tracker_backend: Explicit backend string ("cotracker" or "tap")
             cotracker_checkpoint: Path to CoTracker checkpoint
             reinit_on_lost_tracking: Re-initialize tracker if too many points are lost
             min_visible_points: Minimum visible points before re-initialization
@@ -67,15 +72,24 @@ class VisionTrackedObjectObservation(Observation):
         self.noise_std = noise_std
         self.episodic_noise_std = episodic_noise_std
 
-        # Initialize CoTracker
-        self.tracker = CoTrackerWrapper(
-            num_envs=self.num_envs,
-            device=self.device,
-            model_name="cotracker2" if use_cotracker else "simple",
-            checkpoint_path=cotracker_checkpoint,
-            grid_size=grid_size,
-            max_points=num_tracking_points,
-        )
+        backend = (tracker_backend or ("cotracker" if use_cotracker else "tap")).lower()
+        if backend == "cotracker":
+            self.tracker = CoTrackerWrapper(
+                num_envs=self.num_envs,
+                device=self.device,
+                model_name="cotracker3_online",
+                checkpoint_path=cotracker_checkpoint,
+                max_points=num_tracking_points,
+            )
+        elif backend in {"tap", "tapir"}:
+            self.tracker = TapTrackerWrapper(
+                num_envs=self.num_envs,
+                device=self.device,
+                max_points=num_tracking_points,
+            )
+        else:
+            raise ValueError(f"Unsupported tracker backend: {backend}")
+        self.tracker_backend = backend
 
         # Camera intrinsics (will be set in startup)
         self.camera_intrinsics = None

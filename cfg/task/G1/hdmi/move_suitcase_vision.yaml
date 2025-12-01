@@ -12,7 +12,7 @@ viewer:
 
 max_episode_length: 500
 
-num_envs: 4
+num_envs: 1
 
 # Enable cameras for vision tracking
 enable_cameras: true
@@ -47,12 +47,8 @@ command:
     - [0.05, 0.0, 0.0]
     - [0.05, 0.0, 0.0]
 
-  # Vision tracking parameters (new)
-  use_vision_tracking: true
-  vision_observation_name: "cotracker_object_position"
-  vision_tracking_delay: 0  # Frames of delay to simulate processing time
-  blend_vision_ground_truth: false  # If true, blend vision and ground truth
-  vision_weight: 1.0  # Weight for vision (1.0 = pure vision, 0.0 = pure ground truth)
+  # Vision tracking control (for inference testing)
+  use_vision_for_tracking: true  # Set to true at runtime to enable vision replacement
 
 observation:
   # Vision-based observations
@@ -62,7 +58,8 @@ observation:
       camera_name: "tiled_camera"
       num_tracking_points: 16
       grid_size: 4
-      use_cotracker: true  # Set to false to use simple template matching
+      use_cotracker: true  # Legacy flag; prefer tracker_backend
+      tracker_backend: "cotracker"  # Set to "tap" to use TAP/TAPIR tracking
       cotracker_checkpoint: null  # Path to CoTracker checkpoint, or null for default
       reinit_on_lost_tracking: true
       min_visible_points: 4

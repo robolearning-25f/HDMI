@@ -173,6 +173,7 @@ artifacts/
 *.ipynb
 *.mp4
 *.zip
+*.png
 
 # local scripts
 *.sh
