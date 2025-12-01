@@ -413,9 +413,14 @@ class RobotObjectTracking(RobotTracking):
         contact_target_pos_offset: List[Tuple[float, float, float]] = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)],
         ## offset from end effector
         contact_eef_pos_offset: List[Tuple[float, float, float]] = [(0.1, 0.0, 0.0), (0.1, 0.0, 0.0)],
+        # vision-based tracking control
+        use_vision_for_tracking: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs, call_update=False)
+
+        # Store vision tracking flag
+        self.use_vision_for_tracking = use_vision_for_tracking
 
         self.extra_objects: List[Articulation | RigidObject] = [self.env.scene[name] for name in extra_object_names]
         self.extra_object_body_id_motion = [self.dataset.body_names.index(name) for name in extra_object_names]
@@ -755,21 +760,46 @@ class RobotObjectTracking(RobotTracking):
                 depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
                 depth_float32 = depth.astype(np.float32)
 
-                # Perform 2D to 3D conversion only if tracked_points is available
+                # Robust fallback logic for vision-based tracking
+                # C = cotracker_3d_points, G = gt_3d_points
+                C = None  # CoTracker reconstructed 3D points
+                G = contact_w  # Ground truth 3D points
+
+                # Validate CoTracker tracking
+                cotracker_valid = False
                 if tracked_points is not None:
-                    # Convert depth to tensor
-                    depth_tensor = torch.from_numpy(depth_float32)
-                    # Get intrinsic matrix as tensor
-                    K_tensor = sensor.data.intrinsic_matrices[env_id]
-                    # current_points has shape (N, 2) for N contact points
-                    # Ensure it's 2D even for single point
-                    if current_points.ndim == 1:
-                        uv_2d = current_points.unsqueeze(0)  # (1, 2)
+                    try:
+                        depth_tensor = torch.from_numpy(depth_float32)
+                        K_tensor = sensor.data.intrinsic_matrices[env_id]
+
+                        # current_points has shape (N, 2) for N contact points
+                        if current_points.ndim == 1:
+                            uv_2d = current_points.unsqueeze(0)  # (1, 2)
+                        else:
+                            uv_2d = current_points  # (N, 2) 
+
+                        # Reconstruct 3D points from 2D tracking: uv2d is from cotracker!! 
+                        C = self.two_d_to_three_d(uv_2d, depth_tensor, K_tensor, cam_quat_w, cam_pos_w)
+
+                        # Validate: check if we got the expected number of points
+                        N_expected = self.num_eefs  # Expected number of contact points
+                        cotracker_valid = (C is not None) and (C.shape[0] == N_expected)
+                    except Exception as e:
+                        print(f"[Warning] CoTracker 3D reconstruction failed: {e}")
+                        cotracker_valid = False
+
+                # Ground truth validation
+                gt_valid = (G is not None) and (G.shape[0] >= self.num_eefs)
+
+                # Apply fallback logic
+                if self.use_vision_for_tracking:
+                    if not cotracker_valid or not gt_valid:
+                        # Fallback: keep previous target if vision/GT unavailable
+                        print(f"[Warning] Vision tracking unavailable (cotracker={cotracker_valid}, gt={gt_valid}), keeping previous target")
                     else:
-                        uv_2d = current_points  # (N, 2)
-                    # world_pts is the 3d points by cotracker
-                    world_pts = self.two_d_to_three_d(uv_2d, depth_tensor, K_tensor, cam_quat_w, cam_pos_w)
-                    # replace simulator's 3d points with world_pts
+                        # Normal case: replace GT with CoTracker result
+                        self.contact_target_pos_w[env_id] = C
+                        print(f"[Info] Using vision-based tracking for env {env_id}")
 
     def _init_debug_draw(self):
         super()._init_debug_draw()
