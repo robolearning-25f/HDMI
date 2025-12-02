@@ -205,27 +205,28 @@ class PerceptualSimpleEnv(SimpleEnv):
 
     def _camera_offset_left(self):
         # Place the camera slightly forward and above the head so it looks ahead.
-        return (0.18, -0.05, 0.08), (0.5, -0.5, 0.5, -0.5)
+        # return (0.18, -0.05, 0.08), (0.5, -0.5, 0.5, -0.5)
+        return (0., -0.05, 0.), (0.5, -0.5, 0.5, -0.5)
 
     def _camera_offset_right(self):
-        return (0.18, 0.05, 0.08), (0.5, -0.5, 0.5, -0.5)
+        return (0., 0.05, 0.), (0.5, -0.5, 0.5, -0.5)
 
     def _create_tiled_camera_cfg(self, sim_utils) -> tuple[TiledCameraCfg, TiledCameraCfg] | None:
         if not self.cfg.get("enable_cameras", False):
             return None
 
-        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
-            focal_length=7.6,
-            focus_distance=400.0,
-            horizontal_aperture=20.0,
-            clipping_range=(0.1, 1.0e5),
-        )
         # camera_spawn_cfg = sim_utils.PinholeCameraCfg(
         #     focal_length=7.6,
-        #     focus_distance=1_000.0,
-        #     horizontal_aperture=10.5,
-        #     clipping_range=(0.1, 1.0e5),
+        #     focus_distance=400.0,
+        #     horizontal_aperture=20.0,
+        #     clipping_range=(0.01, 1.0e5),
         # )
+        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
+            focal_length=7.6,
+            focus_distance=1_000.0,
+            horizontal_aperture=10.5,
+            clipping_range=(0.01, 1.0e5),
+        )
 
         pos_offset_l, rot_offset_l = self._camera_offset_left()
         left_camera_cfg = TiledCameraCfg(
