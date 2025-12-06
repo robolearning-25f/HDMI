@@ -108,9 +108,9 @@ class EpisodeStats:
         return self._episodes.item()
 
 
-def make_env_policy(cfg: DictConfig):
+def make_env_policy(cfg: DictConfig, enable_debug_draw: bool = True):
     OmegaConf.set_struct(cfg, False)
-    from active_adaptation.envs import PerceptualSimpleEnv
+    from active_adaptation.envs import PerceptualSimpleEnv, SimpleEnv
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, VecNorm, StepCounter
     
     policy_in_keys = cfg.algo.get("in_keys", ["policy", "priv"])
@@ -124,7 +124,10 @@ def make_env_policy(cfg: DictConfig):
             print(colored(f"Discard obs group {obs_group_key} as it is not used.", "yellow"))
 
     # If you don't need camera you can use SimpleEnv instead.
-    base_env = PerceptualSimpleEnv(cfg.task)
+    if not cfg.task.get("enable_cameras", False):
+        base_env = SimpleEnv(cfg.task, enable_debug_draw=enable_debug_draw)
+    else:
+        base_env = PerceptualSimpleEnv(cfg.task, enable_debug_draw=enable_debug_draw)
 
     checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path)
     if checkpoint_path is not None:

@@ -17,14 +17,16 @@ setup(
         "termcolor",
         "setproctitle",
         "pygame", # for game controller
+        "pypose",
         "mujoco",
         "xxhash",
         "onnxscript==0.3.0",
         "onnxruntime==1.22.0",
         "torch==2.7.0",
-        "rerun_sdk<0.27",
+        "rerun_sdk>=0.23,<0.24",
         "torchrl==0.7.0",
         "tensordict==0.7.0",
-        "numpy==1.26.0"
+        "numpy==1.26.0",
+        "pipx"
     ],
 )

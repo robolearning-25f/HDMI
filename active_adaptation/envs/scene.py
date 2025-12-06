@@ -25,5 +25,3 @@ elif active_adaptation.get_backend() == "mujoco":
     pass
 else:
     raise NotImplementedError
-
-

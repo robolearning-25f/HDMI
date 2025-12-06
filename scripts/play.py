@@ -17,7 +17,7 @@ def main(cfg):
     app_launcher = AppLauncher(cfg.app)
     simulation_app = app_launcher.app
 
-    env, policy, _ = make_env_policy(cfg)
+    env, policy, _ = make_env_policy(cfg, enable_debug_draw=False)
     
     rollout_policy = (
         policy.get_inference_policy()
