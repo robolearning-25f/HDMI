@@ -285,8 +285,11 @@ class ref_contact_pos_b(RobotObjectTrackObservation):
     def update(self):
         if self.noise_std > 0.0:
             self.step_noise = torch.randn_like(self.command_manager.contact_target_pos_w).clamp(-3, 3) * self.noise_std
-
-        ref_contact_target_pos_w = self.command_manager.contact_target_pos_w # shape: [num_envs, n, 3]
+        if getattr(self.command_manager, 'valid_tracker', False):
+            ref_contact_target_pos_w = self.command_manager.tracker_contact_target_pos_w
+        else:
+            ref_contact_target_pos_w = self.command_manager.contact_target_pos_w # shape: [num_envs, n, 3]
+        
         robot_root_pos_w = self.command_manager.robot_root_pos_w[:, None, :] # shape: [num_envs, 1, 3]
         robot_root_quat_w = self.command_manager.robot_root_quat_w[:, None, :] # shape: [num_envs, 1, 4]
 

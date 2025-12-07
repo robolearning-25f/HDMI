@@ -421,6 +421,7 @@ class RobotObjectTracking(RobotTracking):
 
         # Store vision tracking flag
         self.use_vision_for_tracking = use_vision_for_tracking
+        self.valid_tracker = False
 
         self.extra_objects: List[Articulation | RigidObject] = [self.env.scene[name] for name in extra_object_names]
         self.extra_object_body_id_motion = [self.dataset.body_names.index(name) for name in extra_object_names]
@@ -481,6 +482,7 @@ class RobotObjectTracking(RobotTracking):
 
             self.contact_target_pos_w = torch.zeros(self.num_envs, len(contact_eef_body_name), 3, device=self.device)
             self.contact_eef_pos_w = torch.zeros(self.num_envs, len(contact_eef_body_name), 3, device=self.device)
+            self.tracker_contact_target_pos_w = torch.zeros_like(self.contact_target_pos_w)
 
             self.eef_contact_forces_w = torch.zeros(self.num_envs, len(contact_eef_body_name), 3, device=self.device)
             self.eef_contact_forces_b = torch.zeros(self.num_envs, len(contact_eef_body_name), 3, device=self.device)
@@ -679,7 +681,7 @@ class RobotObjectTracking(RobotTracking):
 
             contact_uv = None
             contact_pts_reproj_w = None
-            sensor = self.env.scene.sensors.get("tiled_camera", None)
+            sensor = self.env.scene.sensors.get("tiled_camera_l", None)
             if sensor is not None:
                 # Project contact targets into camera image and back-project using depth.
                 # Derive camera pose from head link + known offset (mirrors PerceptualSimpleEnv camera mount).
@@ -754,6 +756,13 @@ class RobotObjectTracking(RobotTracking):
                         self.tracker_initialized[env_id] = True
                     tracked_points, visibility = self.tracker.update(cotracker_input)
                     current_points, current_visibility = tracked_points[env_id, -1], visibility[env_id, -1]
+                    from torchvision import utils
+                    cotracker_input[0, :, int(current_points[0, 1]), int(current_points[0, 0])] = 255.0  # mark tracked point in debug image
+                    cotracker_input[0, :, int(current_points[1, 1]), int(current_points[1, 0])] = 255.0  # mark tracked point in debug image
+                    utils.save_image(cotracker_input / 255.0, f"inv_{ts:06d}.png")
+                    torch.save({"input": cotracker_input, "tracked_points": tracked_points, "visibility": visibility}, f"inv_cotracker_{ts:06d}.pt")
+                    if not current_visibility.all():
+                        tracked_points = None
                 if tracked_points is not None:
                     print('Tracked points:', current_points, uv)
                 
@@ -790,7 +799,7 @@ class RobotObjectTracking(RobotTracking):
 
                 # Ground truth validation
                 gt_valid = (G is not None) and (G.shape[0] >= self.num_eefs)
-
+                self.valid_tracker = False
                 # Apply fallback logic
                 if self.use_vision_for_tracking:
                     if not cotracker_valid or not gt_valid:
@@ -798,7 +807,9 @@ class RobotObjectTracking(RobotTracking):
                         print(f"[Warning] Vision tracking unavailable (cotracker={cotracker_valid}, gt={gt_valid}), keeping previous target")
                     else:
                         # Normal case: replace GT with CoTracker result
-                        self.contact_target_pos_w[env_id] = C
+                        self.tracker_contact_target_pos_w[env_id] = C
+                        self.valid_tracker = True
+                        print('>>>>', self.tracker_contact_target_pos_w[env_id], self.contact_target_pos_w[env_id])
                         print(f"[Info] Using vision-based tracking for env {env_id}")
 
     def _init_debug_draw(self):
