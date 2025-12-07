@@ -6,6 +6,7 @@ from isaaclab.utils.math import (
     quat_apply_inverse,
     quat_mul,
     quat_conjugate,
+    quat_apply,
     matrix_from_quat,
     yaw_quat,
     wrap_to_pi
@@ -512,3 +513,189 @@ class diff_object_joint_pos_future(RobotObjectTrackObservation):
 class ref_object_contact_future(RobotObjectTrackObservation):
     def compute(self):
         return self.command_manager.ref_object_contact_future.view(self.num_envs, -1)
+
+import numpy as np
+
+def two_d_to_three_d(
+    uv: torch.Tensor,
+    depth: torch.Tensor,
+    K: torch.Tensor,
+    cam_quat_w: torch.Tensor,
+    cam_pos_w: torch.Tensor,
+) -> torch.Tensor:
+    # uv: (N, 2) in pixel coordinates
+    # depth: (H, W)
+    # K: (3, 3)
+    # cam_quat_w: (4,) world rotation of camera (w, x, y, z)
+    # cam_pos_w: (3,) world position of camera
+
+    device = uv.device
+    depth = depth.to(device)
+    K = K.to(device)
+    cam_quat_w = cam_quat_w.to(device)
+    cam_pos_w = cam_pos_w.to(device)
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    H, W = depth.shape[-2], depth.shape[-1]
+    N = uv.shape[0]
+
+    u = torch.clamp(torch.round(uv[:, 0]).long(), 0, W - 1)
+    v = torch.clamp(torch.round(uv[:, 1]).long(), 0, H - 1)
+
+    d = depth[v, u]  # (N,)
+
+    x_cam = (uv[:, 0] - cx) * d / fx
+    y_cam = (uv[:, 1] - cy) * d / fy
+    z_cam = d
+
+    cam_pt = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (N, 3)
+
+    if cam_quat_w.dim() == 1:
+        cam_quat_w = cam_quat_w.unsqueeze(0).expand(N, -1)  # (N, 4)
+    if cam_pos_w.dim() == 1:
+        cam_pos_w = cam_pos_w.unsqueeze(0).expand(N, -1)    # (N, 3)
+
+    world_pt = quat_apply(cam_quat_w, cam_pt) + cam_pos_w   # (N, 3)
+    return world_pt
+    
+from torchvision import utils
+from cotracker_wrapper import SingleEnvCoTrackerWrapper
+
+class tracker(RobotObjectTrackObservation):
+    """
+    Point tracking using left tiled camera
+    Gets ref_contact_target_pos_w from tracker and converts to robot frame
+    Similar structure to ref_contact_pos_b but specifically for vision-based tracking
+    """
+    def __init__(self, camera_name: str = "tiled_camera_l", noise_std: float=0.0, episodic_noise_std: float=0.0, yaw_only: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.tracker = []
+        self.num_contact_point = self.command_manager.contact_target_pos_w.shape[1]
+        for _ in range(self.num_envs):
+            self.tracker.append(SingleEnvCoTrackerWrapper(device=self.device, max_points=self.num_contact_point))
+        self.tracker_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        camera = self.env.scene.sensors[camera_name]
+        self.camera_size = torch.tensor([camera.image_shape[0], camera.image_shape[1]], device=self.device)
+        self.contact_point_w = torch.zeros_like(self.command_manager.contact_target_pos_w)
+        self.ref_contact_pos_b = torch.zeros_like(self.command_manager.contact_target_pos_w)
+
+        self.noise_std = noise_std
+        self.episodic_noise_std = episodic_noise_std
+        self.yaw_only = yaw_only
+        self.step_noise = torch.zeros_like(self.command_manager.contact_target_pos_w)
+        self.episodic_noise = torch.zeros_like(self.command_manager.contact_target_pos_w)
+
+
+    def reset(self, env_ids):
+        super().reset(env_ids)
+        self.tracker_initialized[env_ids] = False
+
+    def update(self):
+        # ============================================================
+        # 3. Vision-Based Tracking (if enabled and main process)
+        # ============================================================
+        # Get contact targets in world frame
+        contact_w = self.command_manager.contact_target_pos_w
+        self.contact_point_w = self.command_manager.contact_target_pos_w
+
+        sensor = self.env.scene.sensors.get("tiled_camera_l", None)
+        # --------------------------------------------------------
+        # 3a. Get Camera Pose
+        # --------------------------------------------------------
+        # TODO: use the ID instead of assuming d435 is 14
+        head_pos_w = self.command_manager.asset.data.body_link_pos_w[:, 14]
+        head_quat_w = self.command_manager.asset.data.body_link_quat_w[:, 14]
+
+        # Camera offset from head link
+        # TODO: get the cam_off by call function instead of fixed
+        cam_off_pos = torch.tensor([0., -0.05, 0.]).repeat(self.num_envs, 1).to(self.device)  # (x, y, z)
+        cam_off_quat = torch.tensor([0.5, -0.5, 0.5, -0.5]).repeat(self.num_envs, 1).to(self.device)  # (w, x, y, z)
+
+        cam_pos_w = head_pos_w + quat_apply(head_quat_w, cam_off_pos)
+        cam_quat_w = quat_mul(head_quat_w, cam_off_quat)
+
+        # --------------------------------------------------------
+        # 3b. Project 3D Contact Points to 2D Image
+        # --------------------------------------------------------
+        # Transform contact points to camera frame
+        intrinsic = sensor.data.intrinsic_matrices
+
+        cam_pos_w_repeat = cam_pos_w[:, None].repeat(1, self.num_contact_point, 1)
+        cam_quat_w_repeat = cam_quat_w[:, None].repeat(1, self.num_contact_point, 1)
+
+        contact_cam = quat_apply_inverse(cam_quat_w_repeat, contact_w - cam_pos_w_repeat)
+
+        zs = contact_cam[..., 2:3] + 1e-8
+        xy_norm = contact_cam[..., :2] / zs  # Shape: (B, M, 2)
+
+        # Forward project to pixel coordinates
+        contact_point_2d = torch.matmul(
+            xy_norm,                                      # (B, M, 2)
+            intrinsic[:, :2, :2].transpose(-1, -2)        # (B, 2, 2)
+        ) + intrinsic[:, :2, 2].unsqueeze(1)              # Result: (B, M, 2)                
+        
+        # --------------------------------------------------------
+        # 3d. Initialize and Update Tracker
+        # --------------------------------------------------------
+
+        # Get RGB frame
+        for env_id in range(self.num_envs):
+            if not (((5 < contact_point_2d[env_id]) & (contact_point_2d[env_id] < self.camera_size)).all() and (getattr(self.env, "timestamp", 0) > 0)):
+                continue
+    
+            input_frame = sensor.data.output["rgb"][env_id].permute(2, 0, 1).unsqueeze(0)
+
+            # Initialize tracker if not initialized
+            if not self.tracker_initialized[env_id]:
+                self.tracker[env_id].reset(input_frame, contact_point_2d[env_id])
+                self.tracker_initialized[env_id] = True
+
+            # Update tracker
+            tracked_points, visibility = self.tracker[env_id].update(input_frame)
+            current_points = tracked_points[-1]  # [num_points, 2]
+            current_visibility = visibility[-1]  # [num_points]
+            
+
+            input_frame[0, :, int(contact_point_2d[env_id, 0, 1]), int(contact_point_2d[env_id, 0, 0])] = 255.0  # mark tracked point in debug image
+            input_frame[0, :, int(contact_point_2d[env_id, 1, 1]), int(contact_point_2d[env_id, 1, 0])] = 255.0  # mark tracked point in debug image
+            input_frame[0, :2, int(current_points[0, 1]), int(current_points[0, 0])] = 255.0  # mark tracked point in debug image
+            input_frame[0, :2, int(current_points[1, 1]), int(current_points[1, 0])] = 255.0  # mark tracked point in debug image
+            utils.save_image(input_frame / 255.0, f"viz_{env_id}.png")
+
+            # Check if all points are visible
+            if not current_visibility.all():
+                return
+
+            # --------------------------------------------------------
+            # 3e. Reconstruct 3D from Tracked 2D Points
+            # --------------------------------------------------------
+            # Get depth image
+            depth = sensor.data.output["depth"][env_id, ..., 0]
+            K_tensor = intrinsic[env_id]
+
+            print(env_id, '>', current_points, contact_point_2d[env_id])
+
+            # Reconstruct 3D points from tracked 2D points + depth
+            tracked_point = two_d_to_three_d(current_points, depth, K_tensor, cam_quat_w[env_id], cam_pos_w[env_id])
+
+            # Validate reconstruction
+            if tracked_point is not None and tracked_point.shape[0] == self.command_manager.num_eefs:
+                self.contact_point_w[env_id] = tracked_point
+                
+        
+    def compute(self):
+        robot_root_pos_w = self.command_manager.robot_root_pos_w[:, None, :]
+        robot_root_quat_w = self.command_manager.robot_root_quat_w[:, None, :]
+        if self.yaw_only:
+            robot_root_quat_w = yaw_quat(robot_root_quat_w)
+
+        ref_contact_pos_b = quat_apply_inverse(robot_root_quat_w, self.contact_point_w - robot_root_pos_w)
+        if self.noise_std > 0.0:
+            noise = torch.randn_like(ref_contact_pos_b).clamp(-1, 1) * self.noise_std
+            ref_contact_pos_b += noise
+        self.ref_contact_pos_b = ref_contact_pos_b + self.episodic_noise + self.step_noise        
+
+        return self.ref_contact_pos_b.view(self.num_envs, -1)

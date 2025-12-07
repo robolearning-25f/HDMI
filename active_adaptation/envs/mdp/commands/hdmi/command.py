@@ -456,7 +456,7 @@ class RobotObjectTracking(RobotTracking):
         self.contact_eef_body_indices_asset = [self.asset.body_names.index(name) for name in contact_eef_body_name]
         # head link index for camera pose reconstruction (used in logging)
         try:
-            self.head_body_idx = self.asset.body_names.index("head_link")
+            self.head_body_idx = self.asset.body_names.index("d435_link")
         except ValueError:
             self.head_body_idx = None
 
@@ -601,17 +601,6 @@ class RobotObjectTracking(RobotTracking):
 
     def update(self):
         super().update()
-        if hasattr(self, "motion_frames"):
-            motion_frame = self.motion_frames[-1]
-            # add object data to the motion frame
-            object_pos_w = self.object.data.body_link_pos_w[:, self.object_body_id_asset].cpu()
-            object_quat_w = self.object.data.body_link_quat_w[:, self.object_body_id_asset].cpu()
-            object_lin_vel_w = self.object.data.body_com_lin_vel_w[:, self.object_body_id_asset].cpu()
-            object_ang_vel_w = self.object.data.body_com_ang_vel_w[:, self.object_body_id_asset].cpu()
-            motion_frame["body_pos_w"] = torch.cat([motion_frame["body_pos_w"], object_pos_w.unsqueeze(1)], dim=1)
-            motion_frame["body_quat_w"] = torch.cat([motion_frame["body_quat_w"], object_quat_w.unsqueeze(1)], dim=1)
-            motion_frame["body_lin_vel_w"] = torch.cat([motion_frame["body_lin_vel_w"], object_lin_vel_w.unsqueeze(1)], dim=1)
-            motion_frame["body_ang_vel_w"] = torch.cat([motion_frame["body_ang_vel_w"], object_ang_vel_w.unsqueeze(1)], dim=1)
 
         self.ref_object_pos_future_w = self.future_ref_motion.body_pos_w[..., self.object_body_id_motion, :] + self.env.scene.env_origins[:, None, :]
         self.ref_object_quat_future_w = self.future_ref_motion.body_quat_w[..., self.object_body_id_motion, :]
@@ -635,13 +624,8 @@ class RobotObjectTracking(RobotTracking):
         
         # contact target and eef pos
         object_pos_w = self.object.data.body_link_pos_w[:, self.object_body_id_asset]
-        print(f"object_pos_w: {object_pos_w[0]}")
         object_quat_w = self.object.data.body_link_quat_w[:, self.object_body_id_asset]
-        print(f"object_quat_w: {object_quat_w[0]}")
-        # print(f"object_heading_w: {yaw_from_quat(object_quat_w)[0]}")
         self.contact_target_pos_w[:] = object_pos_w.unsqueeze(1) + quat_apply(object_quat_w.unsqueeze(1), self.contact_target_pos_offset)
-        print(f"contact_target_pos_w: {self.contact_target_pos_w[0]}")
-        print("\n")
         eef_pos_w = self.asset.data.body_link_pos_w[:, self.contact_eef_body_indices_asset]
         eef_quat_w = self.asset.data.body_link_quat_w[:, self.contact_eef_body_indices_asset]
         self.contact_eef_pos_w[:] = eef_pos_w + quat_apply(eef_quat_w, self.contact_eef_pos_offset)
@@ -652,165 +636,6 @@ class RobotObjectTracking(RobotTracking):
                 self.eef_contact_forces_w[:, eef_idx] += eef_sensor.data.force_matrix_w[:, eef_sensor_id, 0]
 
         self.eef_contact_forces_b[:] = quat_apply_inverse(object_quat_w.unsqueeze(1), self.eef_contact_forces_w)
-
-        if aa.is_main_process():
-            # log RGB-D and object/contact info for env 0
-            env_id = 0
-            log_root = os.path.join(os.getcwd(), "inf_log")
-            inv_log_root = os.path.join(os.getcwd(), "inv_log_to3d")
-            os.makedirs(log_root, exist_ok=True)
-            os.makedirs(inv_log_root, exist_ok=True)
-            ts = getattr(self.env, "timestamp", 0)
-
-            def _yaw_from_quat(q: torch.Tensor):
-                qw, qx, qy, qz = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
-                return math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
-
-            obj_pos_w = self.object_pos_w[env_id].detach().cpu()
-            obj_quat_w = self.object_quat_w[env_id].detach().cpu()
-            yaw_obj_w = _yaw_from_quat(obj_quat_w)
-
-            robot_pos_w = self.robot_root_pos_w[env_id].detach().cpu()
-            robot_quat_w = self.robot_root_quat_w[env_id].detach().cpu()
-            yaw_robot = _yaw_from_quat(robot_quat_w)
-            yaw_obj_b = ((yaw_obj_w - yaw_robot + math.pi) % (2 * math.pi)) - math.pi
-
-            contact_w = self.contact_target_pos_w[env_id].detach().cpu()
-            contact_b = quat_apply_inverse(robot_quat_w.unsqueeze(0), contact_w - robot_pos_w).detach().cpu()
-            obj_pos_b = quat_apply_inverse(robot_quat_w.unsqueeze(0), (obj_pos_w - robot_pos_w).unsqueeze(0))[0].detach().cpu()
-
-            contact_uv = None
-            contact_pts_reproj_w = None
-            sensor = self.env.scene.sensors.get("tiled_camera_l", None)
-            if sensor is not None:
-                # Project contact targets into camera image and back-project using depth.
-                # Derive camera pose from head link + known offset (mirrors PerceptualSimpleEnv camera mount).
-                cam_pos_w = None
-                cam_quat_w = None
-                if self.head_body_idx is not None:
-                    head_pos_w = self.asset.data.body_link_pos_w[env_id, self.head_body_idx].detach().cpu()
-                    head_quat_w = self.asset.data.body_link_quat_w[env_id, self.head_body_idx].detach().cpu()
-                    # offset matches PerceptualSimpleEnv._camera_offset
-                    cam_off_pos = torch.tensor([0.18, 0.0, 0.08])
-                    cam_off_quat = torch.tensor([0.5, -0.5, 0.5, -0.5])
-                    cam_pos_w = head_pos_w + quat_apply(head_quat_w.unsqueeze(0), cam_off_pos).squeeze(0)
-                    cam_quat_w = quat_mul(head_quat_w, cam_off_quat)
-
-                K = None
-                if hasattr(sensor.data, "intrinsic_matrices"):
-                    K = sensor.data.intrinsic_matrices[env_id].detach().cpu().numpy()
-                elif hasattr(sensor.data, "intrinsic_matrix"):
-                    K = sensor.data.intrinsic_matrix[env_id].detach().cpu().numpy()
-                else:
-                    # Fallback: build intrinsics from camera cfg (pinhole model).
-                    H, W = sensor.image_shape
-                    focal_length = 7.6
-                    horizontal_aperture = 20.0
-                    fx = fy = focal_length * (W / horizontal_aperture)
-                    cx = W / 2.0
-                    cy = H / 2.0
-                    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-                if (K is not None) and (cam_pos_w is not None):
-                    depth_img = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
-                    fx, fy = K[0, 0], K[1, 1]
-                    cx, cy = K[0, 2], K[1, 2]
-
-                    # Transform contact points to camera frame.
-                    contact_cam = quat_rotate_inverse(cam_quat_w.unsqueeze(0), contact_w - cam_pos_w)
-                    contact_cam_np = contact_cam.numpy()
-                    zs = contact_cam_np[:, 2:3] + 1e-8
-                    # Forward project to pixels.
-                    uv = (K[:2, :2] @ contact_cam_np[:, :2].T / zs.T).T + K[:2, 2]
-                    contact_uv = uv.tolist()
-
-                    # Back-project using depth image to verify projection round-trip.
-                    depth = sensor.data.output["depth"][env_id].squeeze(-1).detach().cpu().numpy()
-                    uv_int = np.round(uv).astype(int)
-                    u = np.clip(uv_int[:, 0], 0, depth.shape[1]-1)
-                    v = np.clip(uv_int[:, 1], 0, depth.shape[0]-1)
-                    sampled_depth = depth[v, u][:, None]
-                    # camera frame coords
-                    fx, fy = K[0, 0], K[1, 1]
-                    cx, cy = K[0, 2], K[1, 2]
-                    x_cam = (uv[:, 0:1] - cx) * sampled_depth / fx
-                    y_cam = (uv[:, 1:2] - cy) * sampled_depth / fy
-                    z_cam = sampled_depth
-                    pts_cam = np.concatenate([x_cam, y_cam, z_cam], axis=1)
-                    # to world
-                    pts_cam_t = torch.from_numpy(pts_cam).float()
-                    pts_w = quat_apply(cam_quat_w.unsqueeze(0), pts_cam_t) + cam_pos_w
-                    contact_pts_reproj_w = pts_w.tolist()
-
-            if sensor is not None:
-                rgb = sensor.data.output["rgb"][env_id].detach().cpu().numpy()[..., :3]
-                # TODO: change H, W to read by camera
-                H, W = float(rgb.shape[0]), float(rgb.shape[1])
-                tracked_points, visibility = None, None
-                if ((5 < uv) & (uv < np.array([W, H]))).all() and (ts > 0):
-                    cotracker_input = sensor.data.output["rgb"][env_id].permute(2, 0, 1).unsqueeze(0)
-                    if not self.tracker_initialized[env_id]:
-                        uv_tensor = torch.from_numpy(uv[None]).float().to(self.device)
-                        env_ids = [env_id]
-                        # save the uv_tensor and cotracker_input for debugging
-                        self.tracker.reset(env_ids, cotracker_input, uv_tensor)
-                        self.tracker_initialized[env_id] = True
-                    tracked_points, visibility = self.tracker.update(cotracker_input)
-                    current_points, current_visibility = tracked_points[env_id, -1], visibility[env_id, -1]
-                    from torchvision import utils
-                    cotracker_input[0, :, int(current_points[0, 1]), int(current_points[0, 0])] = 255.0  # mark tracked point in debug image
-                    cotracker_input[0, :, int(current_points[1, 1]), int(current_points[1, 0])] = 255.0  # mark tracked point in debug image
-                    utils.save_image(cotracker_input / 255.0, f"inv_{ts:06d}.png")
-                    torch.save({"input": cotracker_input, "tracked_points": tracked_points, "visibility": visibility}, f"inv_cotracker_{ts:06d}.pt")
-                    if not current_visibility.all():
-                        tracked_points = None
-                if tracked_points is not None:
-                    print('Tracked points:', current_points, uv)
-                
-                depth_mm = (np.clip(depth, 0.0, 10.0) * 1000.0).astype("uint16")
-                depth_float32 = depth.astype(np.float32)
-
-                # Robust fallback logic for vision-based tracking
-                # C = cotracker_3d_points, G = gt_3d_points
-                C = None  # CoTracker reconstructed 3D points
-                G = contact_w  # Ground truth 3D points
-
-                # Validate CoTracker tracking
-                cotracker_valid = False
-                if tracked_points is not None:
-                    try:
-                        depth_tensor = torch.from_numpy(depth_float32)
-                        K_tensor = sensor.data.intrinsic_matrices[env_id]
-
-                        # current_points has shape (N, 2) for N contact points
-                        if current_points.ndim == 1:
-                            uv_2d = current_points.unsqueeze(0)  # (1, 2)
-                        else:
-                            uv_2d = current_points  # (N, 2) 
-
-                        # Reconstruct 3D points from 2D tracking: uv2d is from cotracker!! 
-                        C = self.two_d_to_three_d(uv_2d, depth_tensor, K_tensor, cam_quat_w, cam_pos_w)
-
-                        # Validate: check if we got the expected number of points
-                        N_expected = self.num_eefs  # Expected number of contact points
-                        cotracker_valid = (C is not None) and (C.shape[0] == N_expected)
-                    except Exception as e:
-                        print(f"[Warning] CoTracker 3D reconstruction failed: {e}")
-                        cotracker_valid = False
-
-                # Ground truth validation
-                gt_valid = (G is not None) and (G.shape[0] >= self.num_eefs)
-                self.valid_tracker = False
-                # Apply fallback logic
-                if self.use_vision_for_tracking:
-                    if not cotracker_valid or not gt_valid:
-                        # Fallback: keep previous target if vision/GT unavailable
-                        print(f"[Warning] Vision tracking unavailable (cotracker={cotracker_valid}, gt={gt_valid}), keeping previous target")
-                    else:
-                        # Normal case: replace GT with CoTracker result
-                        self.tracker_contact_target_pos_w[env_id] = C
-                        self.valid_tracker = True
-                        print('>>>>', self.tracker_contact_target_pos_w[env_id], self.contact_target_pos_w[env_id])
-                        print(f"[Info] Using vision-based tracking for env {env_id}")
 
     def _init_debug_draw(self):
         super()._init_debug_draw()
