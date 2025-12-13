@@ -562,6 +562,7 @@ def two_d_to_three_d(
     
 from torchvision import utils
 from cotracker_wrapper import SingleEnvCoTrackerWrapper
+import wandb
 
 class tracker(RobotObjectTrackObservation):
     """
@@ -588,6 +589,9 @@ class tracker(RobotObjectTrackObservation):
         self.step_noise = torch.zeros_like(self.command_manager.contact_target_pos_w)
         self.episodic_noise = torch.zeros_like(self.command_manager.contact_target_pos_w)
 
+        wandb.init()
+        self.step = 0
+
 
     def reset(self, env_ids):
         super().reset(env_ids)
@@ -600,6 +604,7 @@ class tracker(RobotObjectTrackObservation):
         # Get contact targets in world frame
         contact_w = self.command_manager.contact_target_pos_w
         self.contact_point_w = self.command_manager.contact_target_pos_w
+        self.step += 1
 
         sensor = self.env.scene.sensors.get("tiled_camera_l", None)
         # --------------------------------------------------------
@@ -682,10 +687,17 @@ class tracker(RobotObjectTrackObservation):
             tracked_point = two_d_to_three_d(current_points, depth, K_tensor, cam_quat_w[env_id], cam_pos_w[env_id])
 
             # Validate reconstruction
+            diff_3d = torch.norm(contact_w[env_id] - tracked_point, dim=-1).cpu().numpy()
+            diff_2d = torch.norm(contact_point_2d[env_id] - current_points, dim=-1).cpu().numpy()
             if tracked_point is not None and tracked_point.shape[0] == self.command_manager.num_eefs:
                 self.contact_point_w[env_id] = tracked_point
-                
-        
+            wandb.log({f"env_{env_id}/tracker_viz": wandb.Image(f"viz_{env_id}.png"),
+                       f"env_{env_id}/point_0_error_2d": diff_2d[0],
+                       f"env_{env_id}/point_1_error_2d": diff_2d[1],
+                       f"env_{env_id}/point_0_error_3d": diff_3d[0],
+                       f"env_{env_id}/point_1_error_3d": diff_3d[1],
+                       }, step=self.step)
+
     def compute(self):
         robot_root_pos_w = self.command_manager.robot_root_pos_w[:, None, :]
         robot_root_quat_w = self.command_manager.robot_root_quat_w[:, None, :]
